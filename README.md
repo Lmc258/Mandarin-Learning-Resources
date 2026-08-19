@@ -176,6 +176,7 @@ Resources best suited for those just starting out (0–HSK 2).
 | YouTube – 30-Min Learning Routine | Video | Polyglot's 30-minute daily routine — explains the self-talk audio method and comprehensible input approach | [I speak 12 languages – copy my 30 min routine](https://youtu.be/_wYjXdt4a2I?si=cQngb9h54ylCF4KK) |
 | Yoyo Chinese | YouTube Channel | Clear beginner grammar and pronunciation explanations; good for filling in gaps | [youtube.com/@YoyoChinese](https://www.youtube.com/@YoyoChinese) |
 | MandarinClick | YouTube Channel | Short stories for comprehensive listening | [youtube.com/@YoyoChinese](https://www.youtube.com/@MandarinClick)|
+| Learn Mandarin Chinese with Paul Noble | Audio Course | Beginner-friendly audio course using Paul Noble's natural, story-based memory method rather than rote repetition | Search "Paul Noble Mandarin Chinese" |
 
 ---
 
