@@ -3,11 +3,15 @@
 mb_anki.py - build Mandarin Blueprint cards in Anki from the terminal.
 
 Type a character; it works out the actor, set, room and props and sends a
-finished note to Anki. The only thing you write is the movie.
+finished note to Anki. Recalling the movie is left to you at review time -
+this tool builds the scaffolding, not the mnemonic.
 
-Your props, actors and sets are notes in an Anki deck of your own (the
-"component deck") - that deck is the source of truth, not a CSV. Anything
-missing is offered as a prompt and saved there as you go.
+Cards always go to a dedicated note type this tool owns, 'Hanzi Movie
+Method' - it is created automatically on first use, never guessed from
+whatever note type you already have. Your props, actors and sets are
+notes in an Anki deck of your own (the "component deck") - that deck is
+the source of truth, not a CSV. Anything missing is offered as a prompt
+and saved there as you go.
 
 Setup (once)
 ------------
@@ -20,7 +24,9 @@ Setup (once)
      Creates the 'MB Component' note type in Anki (if missing) and writes
      hmm.ini (tone rooms + syllable-split corrections) to your save directory.
   4. python3 mb_anki.py shell
-     The first run asks which deck holds your props/actors/sets.
+     The first run asks which deck to add cards to, and which deck holds
+     your props/actors/sets. 'Hanzi Movie Method' is created (or repaired,
+     if you've since added a field here) automatically.
 
 Daily use
 ---------
@@ -28,7 +34,7 @@ Daily use
 
     > only
       character  pinyin  ·  meaning
-      cast / location / room / props, then a prompt for the script.
+      cast / location / room / props, then a prompt to confirm.
 
   Anything missing from your component deck is offered as a prompt: type a
   value to save it as a new note there, press enter to skip it, or q to
@@ -39,7 +45,8 @@ Other commands
   inspect        list your decks, note types and field names
   hmm-init       create the 'MB Component' note type and hmm.ini
   hmm-check      preview the scaffolding for a whole word list, changing nothing
-  add FILE       bulk-import a word list without prompting
+  add FILE       bulk-import a word list without prompting (one hanzi/word per
+                 line; blank lines and lines starting with # are skipped)
   migrate-props  one-off: push old actors.csv/sets.csv/props.csv into the component deck
   migrate-legacy one-off: standardize old-format cards already in the component deck
   syllables      print the full computed initial/final split (--diff for overrides only)
@@ -74,30 +81,52 @@ APP_CONFIG_PATH = os.path.join(CACHE_DIR, "app_config.json")
 COMPONENT_MODEL = "MB Component"
 DEFAULT_COMPONENT_DECK = "mandarin-blueprint-imports-actors-sets-props"
 
-# Field-name synonyms used to auto-map our data onto your note type.
-# First match wins, case-insensitive. Override with --map.
-FIELD_SYNONYMS = {
-    "hanzi": ["hanzi", "character", "characters", "chinese", "word", "simplified", "front"],
-    "pinyin": ["pinyin", "reading", "pronunciation", "romanisation", "romanization"],
-    "meaning": ["meaning", "english", "definition", "translation", "keyword", "back"],
-    "audio": ["audio", "sound", "pronunciation audio", "tts"],
-    "examples": ["examples", "example words", "words", "vocab", "example"],
-    "mnemonic": ["mnemonic", "movie", "story", "scene", "notes", "memory"],
-    "actor": ["actor", "actors"],
-    "set": ["set", "sets", "location", "place"],
-    "room": ["room", "tone location", "tone room", "rooms"],
-    "props": ["props", "prop", "components", "component", "radicals"],
-    "initial": ["initial", "initials"],
-    "final": ["final", "finals"],
-    "tone": ["tone", "tone number"],
-}
+# The note type this tool owns for word/character cards. Fixed, not guessed:
+# no stock Chinese note type has Actor/Set/Room/Props fields, so matching
+# against whatever the user already has silently drops most of the card.
+# 'Hanzi' (the sort field) is what duplicate detection keys on.
+WORD_MODEL = "Hanzi Movie Method"
+WORD_FIELDS = ["Hanzi", "Pinyin", "Meaning", "Actor", "Set", "Room", "Props",
+               "Examples", "Audio", "Initial", "Final", "Tone"]
 
-# Field-name synonyms for the component deck (props/actors/sets note type).
-COMPONENT_FIELD_SYNONYMS = {
-    "kind": ["kind", "type"],
-    "key": ["key", "id"],
-    "value": ["value", "name", "meaning"],
+WORD_CSS = """\
+.card {
+  font-family: arial;
+  text-align: center;
+  color: black;
+  background-color: white;
 }
+.hanzi { font-size: 64px; }
+.pinyin { font-size: 22px; color: #333; margin-top: 8px; }
+.meaning { font-size: 20px; margin-bottom: 12px; }
+.scene {
+  display: inline-block;
+  text-align: left;
+  font-size: 15px;
+  color: #666;
+  margin-top: 8px;
+}
+.scene .row { margin: 2px 0; }
+.scene .label { display: inline-block; width: 60px; color: #999; }
+.examples { font-size: 13px; color: #888; margin-top: 14px; }
+"""
+
+WORD_FRONT = """\
+<div class="hanzi">{{Hanzi}}</div>
+{{Audio}}"""
+
+WORD_BACK = """\
+{{FrontSide}}
+<hr id=answer>
+<div class="pinyin">{{Pinyin}}</div>
+<div class="meaning">{{Meaning}}</div>
+<div class="scene">
+  <div class="row"><span class="label">actor</span>{{Actor}}</div>
+  <div class="row"><span class="label">set</span>{{Set}}</div>
+  <div class="row"><span class="label">room</span>{{Room}}</div>
+  <div class="row"><span class="label">props</span>{{Props}}</div>
+</div>
+{{#Examples}}<div class="examples">{{Examples}}</div>{{/Examples}}"""
 
 TONE_MARKS = {
     "a": "āáǎàa", "e": "ēéěèe", "i": "īíǐìi", "o": "ōóǒòo",
@@ -380,6 +409,27 @@ def ensure_component_model():
            }])
 
 
+def ensure_word_model():
+    """Create the 'Hanzi Movie Method' note type, or add any field that's
+    missing from it (e.g. because a field was added here since). Never
+    touches existing notes - only the model definition."""
+    if WORD_MODEL not in invoke("modelNames"):
+        invoke("createModel", modelName=WORD_MODEL, inOrderFields=WORD_FIELDS,
+               css=WORD_CSS, cardTemplates=[{
+                   "Name": "Recognition", "Front": WORD_FRONT, "Back": WORD_BACK,
+               }])
+        print(f"created note type '{WORD_MODEL}' ({len(WORD_FIELDS)} fields)")
+        return
+    fields = invoke("modelFieldNames", modelName=WORD_MODEL)
+    missing = [f for f in WORD_FIELDS if f not in fields]
+    for f in missing:
+        invoke("modelFieldAdd", modelName=WORD_MODEL, fieldName=f)
+    if missing:
+        print(f"using note type '{WORD_MODEL}' (added missing field(s): {', '.join(missing)})")
+    else:
+        print(f"using note type '{WORD_MODEL}'")
+
+
 class ComponentStore:
     """Fronts the component deck: your props/actors/sets live there as notes,
     one per (kind, key). Loaded once per session; add() refreshes in place
@@ -399,11 +449,10 @@ class ComponentStore:
                 f"Note type '{COMPONENT_MODEL}' not found in Anki ({exc}).\n"
                 f"Run: python3 mb_anki.py hmm-init"
             )
-        self.mapping = auto_map(fields, {}, COMPONENT_FIELD_SYNONYMS)
-        missing = [f for f in ("kind", "key", "value") if f not in self.mapping]
+        missing = [f for f in ("Kind", "Key", "Value") if f not in fields]
         if missing:
             raise SystemExit(
-                f"Note type '{COMPONENT_MODEL}' has no field that looks like "
+                f"Note type '{COMPONENT_MODEL}' is missing field(s) "
                 f"{', '.join(missing)}. Fields: {fields}"
             )
         self._data = {"actor": {}, "set": {}, "prop": {}}
@@ -417,9 +466,9 @@ class ComponentStore:
         if not ids:
             return
         for note in invoke("notesInfo", notes=ids):
-            kind = note["fields"].get(self.mapping["kind"], {}).get("value", "").strip().lower()
-            key = note["fields"].get(self.mapping["key"], {}).get("value", "").strip()
-            value = note["fields"].get(self.mapping["value"], {}).get("value", "").strip()
+            kind = note["fields"].get("Kind", {}).get("value", "").strip().lower()
+            key = note["fields"].get("Key", {}).get("value", "").strip()
+            value = note["fields"].get("Value", {}).get("value", "").strip()
             if kind not in self._data or not key:
                 continue
             self._data[kind][key] = value
@@ -449,8 +498,7 @@ class ComponentStore:
     def add(self, kind, key, value):
         if self.has(kind, key):
             raise ValueError(f"{kind} '{key}' already exists in the component deck")
-        fields = {self.mapping["kind"]: kind, self.mapping["key"]: key,
-                  self.mapping["value"]: value}
+        fields = {"Kind": kind, "Key": key, "Value": value}
         invoke("addNote", note={"deckName": self.deck, "modelName": COMPONENT_MODEL,
                                 "fields": fields, "tags": [kind.capitalize()],
                                 "options": {"allowDuplicate": False}})
@@ -619,47 +667,18 @@ def fetch_audio(text: str) -> bytes | None:
         return None
 
 
-# --------------------------------------------------------------------------
-# Mapping our data onto the user's note type
-# --------------------------------------------------------------------------
-
-def auto_map(note_fields: list[str], overrides: dict[str, str],
-             synonyms: dict[str, list[str]] = FIELD_SYNONYMS) -> dict[str, str]:
-    lowered = {f.lower(): f for f in note_fields}
-    mapping = {}
-    for key, syns in synonyms.items():
-        if key in overrides:
-            target = overrides[key]
-            if target not in note_fields:
-                raise SystemExit(
-                    f"Field '{target}' is not in note type. Available: {note_fields}"
-                )
-            mapping[key] = target
-            continue
-        for syn in syns:
-            if syn in lowered:
-                mapping[key] = lowered[syn]
-                break
-    return mapping
-
-
 def parse_input(path: str):
+    """One hanzi/word per line. Blank lines and lines starting with # are
+    skipped."""
     items = []
     with open(path, encoding="utf-8") as fh:
         for raw in fh:
-            line = raw.strip()
-            if not line or line.startswith("#"):
+            word = raw.strip()
+            if not word or word.startswith("#"):
                 continue
-            if "\t" in line:
-                word, mnemonic = line.split("\t", 1)
-            elif "|" in line:
-                word, mnemonic = line.split("|", 1)
+            if HANZI_RE.search(word):
+                items.append(word)
             else:
-                word, mnemonic = line, ""
-            word = word.strip()
-            if word and HANZI_RE.search(word):
-                items.append((word, mnemonic.strip()))
-            elif word:
                 sys.stderr.write(f"  ! skipping non-Chinese line: {word}\n")
     return items
 
@@ -810,7 +829,7 @@ def show_card(word, entry, scene, props, examples, duplicate):
     print(f"  {C['bold']}{word}{C['off']}  {numbered_to_marks(entry['pinyin'])}"
           f"  {C['dim']}·{C['off']}  {'; '.join(entry['glosses'][:4])}")
     if duplicate:
-        print(f"  {C['yellow']}already in this note type{C['off']}")
+        print(f"  {C['yellow']}already in this deck{C['off']}")
     print()
 
     def line(label, value, key, missing):
@@ -870,12 +889,27 @@ def fill_gaps(word, hmm, scene, props):
     return changed
 
 
+def known_scene_value(value):
+    """scene()'s actor/set come back as a '[key-?]' placeholder when unknown
+    - fine for show_card's display, but that placeholder must not end up
+    written into the card as if it were a real answer. Skipped stays blank."""
+    return value if value and not value.endswith("-?]") else ""
+
+
+def warn_empty_fields(fields, indent="  "):
+    """Say so out loud if a field we always try to fill came out blank.
+    Audio is excluded - it's legitimately empty whenever audio is off."""
+    blank = [f for f in WORD_FIELDS if f != "Audio" and not fields.get(f)]
+    if blank:
+        print(f"{indent}{C['yellow']}warning: empty field(s): {', '.join(blank)}{C['off']}")
+    return blank
+
+
 SHELL_HELP = """
   <character>     look it up and build a card
   <word>          several characters are treated as one word if it's in the
                   dictionary, otherwise queued one character at a time
   deck            change the target deck
-  note            change the note type
   component-deck  change which deck holds your props/actors/sets
   audio           toggle downloading pronunciation audio
   where           print the paths of your config and component deck
@@ -906,36 +940,24 @@ def cmd_shell(args):
     settings = load_settings(cfg)
 
     decks = sorted(invoke("deckNames"))
-    models = sorted(invoke("modelNames"))
     deck = args.deck or choose("Which deck?", decks, settings.get("deck"))
-    note_type = args.note_type or choose("Which note type?", models, settings.get("note_type"))
     component_deck = args.component_deck or choose(
         "Which deck holds your props/actors/sets?", decks,
         settings.get("component_deck", DEFAULT_COMPONENT_DECK))
     audio = args.audio or settings.get("audio", False)
-    save_settings(cfg, {"deck": deck, "note_type": note_type,
-                         "component_deck": component_deck, "audio": audio})
+    save_settings(cfg, {"deck": deck, "component_deck": component_deck, "audio": audio})
 
-    mapping, note_fields = None, None
-    try:
-        note_fields = invoke("modelFieldNames", modelName=note_type)
-        mapping = auto_map(note_fields, {})
-    except Exception as exc:  # noqa: BLE001
-        raise SystemExit(f"Couldn't read '{note_type}': {exc}")
-    if "hanzi" not in mapping:
-        raise SystemExit(f"No field on '{note_type}' looks like the character field.\n"
-                         f"Fields: {note_fields}")
-
+    ensure_word_model()
     store = ComponentStore(component_deck)
     hmm = HMM(cfg, store)
     print(f"\n  {C['bold']}Hanzi Movie Method{C['off']}  {C['dim']}·  "
           f"{len(hmm.actors)} actors, {len(hmm.sets)} sets, {len(hmm.props)} props{C['off']}")
-    print(f"  {C['dim']}deck{C['off']} {deck}   {C['dim']}note{C['off']} {note_type}"
+    print(f"  {C['dim']}deck{C['off']} {deck}"
           f"   {C['dim']}component deck{C['off']} {component_deck}"
           f"   {C['dim']}audio{C['off']} {'on' if audio else 'off'}")
     print(f"  {C['dim']}? for help, q to quit{C['off']}")
 
-    known, existing = collection_state(note_type, mapping["hanzi"])
+    known, existing = collection_state(deck)
     queue = []
 
     while True:
@@ -955,14 +977,8 @@ def cmd_shell(args):
                     continue
                 if low == "deck":
                     deck = choose("Which deck?", sorted(invoke("deckNames")))
+                    known, existing = collection_state(deck)
                     save_settings(cfg, {"deck": deck})
-                    continue
-                if low == "note":
-                    note_type = choose("Which note type?", sorted(invoke("modelNames")))
-                    note_fields = invoke("modelFieldNames", modelName=note_type)
-                    mapping = auto_map(note_fields, {})
-                    known, existing = collection_state(note_type, mapping["hanzi"])
-                    save_settings(cfg, {"note_type": note_type})
                     continue
                 if low == "component-deck":
                     component_deck = choose("Which deck holds your props/actors/sets?",
@@ -995,8 +1011,7 @@ def cmd_shell(args):
                     queue = chars[1:]
                     word = chars[0]
 
-            build_one(word, entries, contains, known, existing, hmm,
-                      deck, note_type, mapping, audio)
+            build_one(word, entries, contains, known, existing, hmm, deck, audio)
 
         except Cancel:
             print(f"  {C['dim']}dropped{C['off']}")
@@ -1013,20 +1028,24 @@ def _write_history(readline, path):
         pass
 
 
-def collection_state(note_type, hanzi_field):
-    ids = invoke("findNotes", query=f'note:"{note_type}"')
+def collection_state(deck):
+    """Everything already in this deck, whatever note type it's under.
+    Anki's first field is the sort field, which for any sane Chinese note
+    type is the character - that's what duplicate detection and the
+    example-word ranking key on."""
+    ids = invoke("findNotes", query=f'deck:"{deck}"')
     known, words = set(), set()
     if ids:
         for note in invoke("notesInfo", notes=ids):
-            val = re.sub(r"<[^>]+>", "", note["fields"].get(hanzi_field, {}).get("value", ""))
+            first = min(note["fields"].values(), key=lambda f: f["order"])
+            val = re.sub(r"<[^>]+>", "", first["value"])
             if val.strip():
                 words.add(val.strip())
                 known.update(HANZI_RE.findall(val))
     return known, words
 
 
-def build_one(word, entries, contains, known, existing, hmm,
-              deck, note_type, mapping, audio):
+def build_one(word, entries, contains, known, existing, hmm, deck, audio):
     entry = lookup(entries, word)
     if not entry:
         print(f"  {C['red']}{word} isn't in CC-CEDICT.{C['off']} Add this one in Anki by hand.")
@@ -1055,39 +1074,39 @@ def build_one(word, entries, contains, known, existing, hmm,
         scene, props = compute()
         show_card(word, entry, scene, props, examples, word in existing)
 
-    movie = ask(f"  {C['dim']}script{C['off']} ")
-
-    fields = {mapping["hanzi"]: word}
-    pairs = [("pinyin", numbered_to_marks(entry["pinyin"])),
-             ("meaning", "; ".join(entry["glosses"][:4])),
-             ("mnemonic", movie),
-             ("actor", scene.get("actor")), ("set", scene.get("set")),
-             ("room", scene.get("room")), ("initial", scene.get("initial")),
-             ("final", scene.get("final")), ("tone", scene.get("tone"))]
-    for key, val in pairs:
-        if key in mapping and val:
-            fields[mapping[key]] = val
-    if "props" in mapping and props:
-        fields[mapping["props"]] = "<br>".join(
-            f"{p['component']} = {p['prop'] or '?'}" for p in props)
-    if "examples" in mapping and examples:
-        fields[mapping["examples"]] = "<br>".join(examples)
+    known_props = [p for p in props if p["prop"]]
+    fields = {
+        "Hanzi": word,
+        "Pinyin": numbered_to_marks(entry["pinyin"]),
+        "Meaning": "; ".join(entry["glosses"][:4]),
+        "Actor": known_scene_value(scene.get("actor")),
+        "Set": known_scene_value(scene.get("set")),
+        "Room": scene.get("room") or "",
+        "Initial": scene.get("initial") or "",
+        "Final": scene.get("final") or "",
+        "Tone": scene.get("tone") or "",
+        "Props": ("<br>".join(f"{p['component']} = {p['prop']}" for p in known_props)
+                  if known_props else ""),
+        "Examples": "<br>".join(examples) if examples else "",
+        "Audio": "",
+    }
+    warn_empty_fields(fields)
 
     if not yes(f"  add to {deck}?"):
         raise Cancel
 
-    if audio and "audio" in mapping:
+    if audio:
         data = fetch_audio(word)
         if data:
             fname = f"mb_{hashlib.md5(word.encode()).hexdigest()[:12]}.mp3"
             invoke("storeMediaFile", filename=fname,
                    data=base64.b64encode(data).decode())
-            fields[mapping["audio"]] = f"[sound:{fname}]"
+            fields["Audio"] = f"[sound:{fname}]"
 
     if deck not in invoke("deckNames"):
         invoke("createDeck", deck=deck)
     try:
-        invoke("addNote", note={"deckName": deck, "modelName": note_type,
+        invoke("addNote", note={"deckName": deck, "modelName": WORD_MODEL,
                                 "fields": fields, "tags": ["mb-auto"],
                                 "options": {"allowDuplicate": False}})
     except RuntimeError as exc:
@@ -1191,7 +1210,7 @@ def cmd_hmm_check(args):
     print(pad("char", 6) + pad("pinyin", 12) + pad("actor", 22)
           + pad("set", 26) + pad("room", 24) + "props")
     print("-" * 118)
-    for word, _mn in parse_input(args.input):
+    for word in parse_input(args.input):
         entry = lookup(entries, word)
         if not entry:
             print(pad(word, 6) + "NOT IN DICTIONARY")
@@ -1228,28 +1247,7 @@ def cmd_inspect(_args):
 
 
 def cmd_add(args):
-    overrides = {}
-    for pair in args.map or []:
-        if "=" not in pair:
-            raise SystemExit(f"--map expects key=Field, got '{pair}'")
-        k, v = pair.split("=", 1)
-        overrides[k.strip()] = v.strip()
-
-    note_fields = invoke("modelFieldNames", modelName=args.note_type)
-    mapping = auto_map(note_fields, overrides)
-    if "hanzi" not in mapping:
-        raise SystemExit(
-            f"Couldn't work out which field holds the character.\n"
-            f"Fields available: {note_fields}\n"
-            f"Pass e.g. --map hanzi='{note_fields[0]}'"
-        )
-    print("Field mapping:")
-    for k in FIELD_SYNONYMS:
-        print(f"  {k:9} -> {mapping.get(k, '(unused)')}")
-    unused = [f for f in note_fields if f not in mapping.values()]
-    if unused:
-        print(f"  (left untouched: {', '.join(unused)})")
-    print()
+    ensure_word_model()
 
     if args.deck not in invoke("deckNames"):
         if args.dry_run:
@@ -1258,16 +1256,7 @@ def cmd_add(args):
             invoke("createDeck", deck=args.deck)
 
     # Everything you already have, used for dedupe and for the example filter.
-    existing_ids = invoke("findNotes", query=f'note:"{args.note_type}"')
-    known: set[str] = set()
-    existing_words: set[str] = set()
-    if existing_ids:
-        for note in invoke("notesInfo", notes=existing_ids):
-            val = note["fields"].get(mapping["hanzi"], {}).get("value", "")
-            val = re.sub(r"<[^>]+>", "", val).strip()
-            if val:
-                existing_words.add(val)
-                known.update(HANZI_RE.findall(val))
+    known, existing_words = collection_state(args.deck)
 
     hmm = None
     if not args.no_hmm:
@@ -1282,7 +1271,7 @@ def cmd_add(args):
     print(f"{len(items)} item(s) in {args.input}; {len(existing_words)} already in collection.\n")
 
     added = skipped = missing = 0
-    for word, mnemonic in items:
+    for word in items:
         if word in existing_words and not args.allow_duplicates:
             print(f"= {word}  (already in collection, skipped)")
             skipped += 1
@@ -1298,25 +1287,26 @@ def cmd_add(args):
         meaning = "; ".join(entry["glosses"][: args.max_glosses])
         examples = build_examples(word, entries, contains, known, args.examples)
 
-        fields = {mapping["hanzi"]: word}
-        if "pinyin" in mapping:
-            fields[mapping["pinyin"]] = pinyin
-        if "meaning" in mapping:
-            fields[mapping["meaning"]] = meaning
-        if "examples" in mapping and examples:
-            fields[mapping["examples"]] = "<br>".join(examples)
-        if "mnemonic" in mapping and mnemonic:
-            fields[mapping["mnemonic"]] = mnemonic
+        fields = {
+            "Hanzi": word, "Pinyin": pinyin, "Meaning": meaning,
+            "Actor": "", "Set": "", "Room": "", "Initial": "", "Final": "", "Tone": "",
+            "Props": "", "Examples": "<br>".join(examples) if examples else "",
+            "Audio": "",
+        }
 
-        scene = {}
+        scene, props = {}, []
         if hmm:
             scene = hmm.scene(entry["pinyin"])
             props = hmm.prop_list(word)
-            for key in ("actor", "set", "room", "initial", "final", "tone"):
-                if key in mapping and scene.get(key):
-                    fields[mapping[key]] = scene[key]
-            if "props" in mapping and props:
-                fields[mapping["props"]] = "<br>".join(props)
+            for key, field in (("room", "Room"), ("initial", "Initial"),
+                               ("final", "Final"), ("tone", "Tone")):
+                if scene.get(key):
+                    fields[field] = scene[key]
+            fields["Actor"] = known_scene_value(scene.get("actor"))
+            fields["Set"] = known_scene_value(scene.get("set"))
+            known_props = [p for p in props if not p.endswith("= ?")]
+            if known_props:
+                fields["Props"] = "<br>".join(known_props)
 
         print(f"+ {word}  {pinyin}  -  {meaning[:60]}")
         if scene:
@@ -1324,8 +1314,9 @@ def cmd_add(args):
             print(f"      props: {', '.join(props) if props else '-'}")
         for ex in examples:
             print(f"      {ex[:70]}")
+        warn_empty_fields(fields, indent="      ")
 
-        if args.audio and "audio" in mapping:
+        if args.audio:
             if args.dry_run:
                 print("      [audio would be downloaded]")
             else:
@@ -1334,13 +1325,13 @@ def cmd_add(args):
                     fname = f"mb_{hashlib.md5(word.encode()).hexdigest()[:12]}.mp3"
                     invoke("storeMediaFile", filename=fname,
                            data=base64.b64encode(data).decode())
-                    fields[mapping["audio"]] = f"[sound:{fname}]"
+                    fields["Audio"] = f"[sound:{fname}]"
                 time.sleep(args.delay)
 
         if not args.dry_run:
             invoke("addNote", note={
                 "deckName": args.deck,
-                "modelName": args.note_type,
+                "modelName": WORD_MODEL,
                 "fields": fields,
                 "tags": ["mb-auto"] + (args.tag or []),
                 "options": {"allowDuplicate": args.allow_duplicates},
@@ -1599,7 +1590,6 @@ def main():
 
     sh = sub.add_parser("shell", help="type characters in, one at a time (the usual way in)")
     sh.add_argument("--deck")
-    sh.add_argument("--note-type")
     sh.add_argument("--component-deck", help="deck holding your props/actors/sets")
     sh.add_argument("--audio", action="store_true")
     sh.add_argument("--config", default=None)
@@ -1608,10 +1598,7 @@ def main():
     a = sub.add_parser("add", help="create notes from a word list")
     a.add_argument("input", help="text file, one hanzi/word per line")
     a.add_argument("--deck", required=True)
-    a.add_argument("--note-type", required=True)
     a.add_argument("--component-deck", help="deck holding your props/actors/sets")
-    a.add_argument("--map", nargs="*", metavar="key=Field",
-                   help="override auto field mapping, e.g. hanzi=Character meaning=Keyword")
     a.add_argument("--audio", action="store_true", help="download TTS audio")
     a.add_argument("--examples", type=int, default=5, help="max example words (default 5)")
     a.add_argument("--max-glosses", type=int, default=4)
