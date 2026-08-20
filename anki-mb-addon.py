@@ -156,6 +156,22 @@ def numbered_to_marks(pinyin: str) -> str:
 # CC-CEDICT
 # --------------------------------------------------------------------------
 
+def download(url, timeout=180, retries=3):
+    """GET a URL, retrying on timeouts/connection hiccups before giving up
+    with a plain sentence instead of a raw traceback."""
+    req = urllib.request.Request(url, headers={"User-Agent": "mb_anki/1.0"})
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except (urllib.error.URLError, OSError) as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                sys.stderr.write(f"  (retrying after: {exc})\n")
+    raise SystemExit(f"Couldn't download {url} ({last_exc}). Check your connection and try again.")
+
+
 def ensure_cedict(path: str | None) -> str:
     if path:
         return path
@@ -163,9 +179,7 @@ def ensure_cedict(path: str | None) -> str:
         return CEDICT_CACHE
     os.makedirs(CACHE_DIR, exist_ok=True)
     sys.stderr.write("Downloading CC-CEDICT (one time, ~4 MB)...\n")
-    req = urllib.request.Request(CEDICT_URL, headers={"User-Agent": "mb_anki/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        raw = gzip.decompress(resp.read())
+    raw = gzip.decompress(download(CEDICT_URL))
     with open(CEDICT_CACHE, "wb") as fh:
         fh.write(raw)
     return CEDICT_CACHE
@@ -412,10 +426,8 @@ def ensure_ids(cfg_dir):
     path = os.path.join(cfg_dir, "ids.txt")
     if os.path.exists(path):
         return path
-    sys.stderr.write("Downloading character decomposition data (one time, ~4 MB)...\n")
-    req = urllib.request.Request(IDS_URL, headers={"User-Agent": "mb_anki/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = resp.read()
+    sys.stderr.write("Downloading character decomposition data (one time, ~10 MB)...\n")
+    data = download(IDS_URL)
     with open(path, "wb") as fh:
         fh.write(data)
     return path
