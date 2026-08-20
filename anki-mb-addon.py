@@ -41,6 +41,7 @@ Other commands
   hmm-check      preview the scaffolding for a whole word list, changing nothing
   add FILE       bulk-import a word list without prompting
   migrate-props  one-off: push old actors.csv/sets.csv/props.csv into the component deck
+  migrate-legacy one-off: standardize old-format cards already in the component deck
   syllables      print the full computed initial/final split (--diff for overrides only)
 
 No third-party packages. Python 3.8+.
@@ -54,6 +55,7 @@ import configparser
 import csv
 import gzip
 import hashlib
+import html
 import json
 import os
 import re
@@ -1378,6 +1380,170 @@ def cmd_migrate_props(args):
     print(f"\n{verb} {created}, already present {skipped}")
 
 
+# --------------------------------------------------------------------------
+# Legacy component-deck cleanup (one-off)
+# --------------------------------------------------------------------------
+
+CJK_RE = re.compile(r"[⺀-⻿㐀-䶿一-鿿豈-﫿]")
+LEGACY_ACTOR_RE = re.compile(r"\b[A-Za-z]{1,4}-")
+LEGACY_SET_RE = re.compile(r"-?[ØøOo]\s*[Nn]ull|-\(?e?\)?[A-Za-z]*")
+LEGACY_BOILERPLATE_RE = re.compile(
+    r"\s*\b(The following|Which|What)\b.*$", re.IGNORECASE | re.DOTALL)
+
+LEGACY_VALID_ACTORS = (set(INITIALS) | {"yi", "yu", "wu"}
+                       | {i + g for i in INITIALS for g in ("i", "u")})
+LEGACY_VALID_SETS = {NULL, "a", "ai", "an", "ang", "ao", "e", "ei", "en", "eng",
+                     "o", "ong", "ou"}
+
+
+def _strip_legacy_html(s):
+    s = html.unescape(s)
+    s = re.sub(r"<[^>]+>", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _clean_legacy_value(s):
+    """Strip the quiz boilerplate, which can sit before OR after the value:
+    'The following prop represents which component ? Campfire' (value trails
+    the last '?') vs 'Billie Eilish Which pinion initial represents this
+    actor?' (value leads a trailing 'Which ...' clause)."""
+    s = s.strip()
+    if "?" in s:
+        prefix, _, suffix = s.rpartition("?")
+        suffix = suffix.strip()
+        if suffix:
+            return suffix
+        return LEGACY_BOILERPLATE_RE.sub("", prefix).strip()
+    return s
+
+
+def _norm_legacy_actor(tok):
+    tok = tok.strip().rstrip("-").strip().lower()
+    return tok if tok in LEGACY_VALID_ACTORS else None
+
+
+def _norm_legacy_set(tok):
+    low = tok.lower()
+    if "null" in low or "Ø" in tok or "ø" in low:
+        return NULL
+    tok = tok.lstrip("-").strip().replace("(e)ng", "eng").replace("(e)n", "en").lower()
+    return tok if tok in LEGACY_VALID_SETS else None
+
+
+def parse_legacy_note(tags, front_raw, back_raw):
+    """Try to pull (kind, key, value) triples out of one old-style quiz note.
+    Returns (results, reason); reason is None on success, else why the note
+    was left alone."""
+    front = _strip_legacy_html(front_raw)
+    back = _strip_legacy_html(back_raw)
+
+    if "Actor" in tags:
+        kind = "actor"
+    elif "Set" in tags:
+        kind = "set"
+    elif "Prop" in tags:
+        kind = "prop"
+    else:
+        return None, "not tagged Prop/Actor/Set"
+
+    if not front or not back:
+        return None, "front or back is empty"
+
+    if kind in ("actor", "set"):
+        token_re = LEGACY_ACTOR_RE if kind == "actor" else LEGACY_SET_RE
+        norm = _norm_legacy_actor if kind == "actor" else _norm_legacy_set
+        m = token_re.search(front) or token_re.search(back)
+        if not m:
+            return None, f"no {kind} token found"
+        key = norm(m.group(0))
+        if not key:
+            return None, f"{kind} token {m.group(0)!r} not recognised"
+        if m.group(0) in front and front.strip() != m.group(0).strip():
+            value = _clean_legacy_value(back)
+        elif m.group(0) in back:
+            value = _clean_legacy_value(front)
+        else:
+            value = _clean_legacy_value(back)
+        return [(kind, key, value)], None
+
+    front_cjk, back_cjk = CJK_RE.findall(front), CJK_RE.findall(back)
+    if back_cjk and not front_cjk:
+        keys, value = back_cjk, front
+    elif front_cjk and not back_cjk:
+        keys, value = front_cjk, back
+    elif front_cjk and back_cjk:
+        return None, "component character on both sides, ambiguous"
+    else:
+        return None, "no component character found"
+    return [("prop", k, _clean_legacy_value(value)) for k in keys], None
+
+
+def cmd_migrate_legacy(args):
+    """One-off: standardize old Front/Back quiz cards already in the
+    component deck into 'MB Component' notes. Old notes that parse cleanly
+    are moved to a '<deck>::legacy-migrated' subdeck, not deleted. Anything
+    that doesn't parse cleanly is left exactly where it is and printed for
+    you to review by hand."""
+    component_deck = resolve_component_deck(args.config, args.component_deck)
+    ensure_component_model()
+    store = ComponentStore(component_deck)
+    legacy_deck = f"{component_deck}::legacy-migrated"
+
+    ids = invoke("findNotes", query=f'deck:"{component_deck}" -note:"{COMPONENT_MODEL}"')
+    notes = invoke("notesInfo", notes=ids) if ids else []
+
+    groups, flagged = {}, []
+    for note in notes:
+        tags = set(note["tags"])
+        front = note["fields"].get("Front", {}).get("value", "")
+        back = note["fields"].get("Back", {}).get("value", "")
+        results, reason = parse_legacy_note(tags, front, back)
+        if reason:
+            flagged.append((note, reason))
+            continue
+        for kind, key, value in results:
+            groups.setdefault((kind, key), []).append({"value": value, "note": note})
+
+    if not args.dry_run and any(len({it["value"].strip() for it in items}) == 1
+                                 and not store.has(kind, key)
+                                 for (kind, key), items in groups.items()):
+        if legacy_deck not in invoke("deckNames"):
+            invoke("createDeck", deck=legacy_deck)
+
+    created = skipped = conflicts = moved = 0
+    for (kind, key), items in sorted(groups.items()):
+        values = {it["value"].strip() for it in items}
+        if len(values) > 1:
+            conflicts += 1
+            print(f"{C['yellow']}conflict{C['off']} {kind} {key!r}: "
+                  + " / ".join(repr(v) for v in sorted(values)) + "  (left alone)")
+            continue
+        value = items[0]["value"]
+        if store.has(kind, key):
+            skipped += 1
+            continue
+        verb = "would create" if args.dry_run else "create"
+        print(f"{verb}  {pad(kind, 6)}{pad(key, 8)}{value}")
+        if not args.dry_run:
+            store.add(kind, key, value)
+            cards = [c for it in items for c in it["note"]["cards"]]
+            invoke("changeDeck", cards=cards, deck=legacy_deck)
+        created += 1
+        moved += len(items)
+
+    mverb = "would create" if args.dry_run else "created"
+    dverb = "would move" if args.dry_run else "moved"
+    print(f"\n{mverb} {created} standardized note(s), {dverb} {moved} old note(s) "
+          f"to '{legacy_deck}', {skipped} already present, {conflicts} conflict(s) left alone")
+
+    if flagged:
+        print(f"\n{len(flagged)} note(s) need your review (not touched):")
+        for note, reason in flagged:
+            front = _strip_legacy_html(note["fields"].get("Front", {}).get("value", ""))
+            print(f"  #{note['noteId']}  {reason}")
+            print(f"      {front[:90]}")
+
+
 def cmd_syllables(args):
     entries, _ = load_cedict(ensure_cedict(args.cedict))
     cp = load_hmm_ini(args.config)
@@ -1467,6 +1633,12 @@ def main():
     mp.add_argument("--component-deck", help="deck holding your props/actors/sets")
     mp.add_argument("--dry-run", action="store_true")
 
+    ml = sub.add_parser("migrate-legacy",
+                        help="one-off: standardize old-format cards in the component deck")
+    ml.add_argument("--config", default=None)
+    ml.add_argument("--component-deck", help="deck holding your props/actors/sets")
+    ml.add_argument("--dry-run", action="store_true")
+
     sy = sub.add_parser("syllables", help="print the computed initial/final split")
     sy.add_argument("--config", default=None)
     sy.add_argument("--cedict")
@@ -1477,7 +1649,7 @@ def main():
         args.config = resolve_config_dir(args.config)
     {"inspect": cmd_inspect, "hmm-init": cmd_hmm_init, "hmm-check": cmd_hmm_check,
      "shell": cmd_shell, "add": cmd_add, "savedir": cmd_savedir,
-     "migrate-props": cmd_migrate_props,
+     "migrate-props": cmd_migrate_props, "migrate-legacy": cmd_migrate_legacy,
      "syllables": cmd_syllables}[args.cmd](args)
 
 
