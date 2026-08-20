@@ -2,19 +2,25 @@
 """
 mb_anki.py - build Mandarin Blueprint cards in Anki from the terminal.
 
-Type a character; it works out the actor, set, room and props from your own
-CSVs and sends a finished note to Anki. The only thing you write is the movie.
+Type a character; it works out the actor, set, room and props and sends a
+finished note to Anki. The only thing you write is the movie.
+
+Your props, actors and sets are notes in an Anki deck of your own (the
+"component deck") - that deck is the source of truth, not a CSV. Anything
+missing is offered as a prompt and saved there as you go.
 
 Setup (once)
 ------------
   1. Install the AnkiConnect add-on in Anki (Tools > Add-ons > Get Add-ons,
      code 2055492159), restart Anki, and leave it running.
   2. The first time you run any command, you'll be asked where to save your
-     files (CSVs, settings, history). Your answer is remembered; change it
+     files (hmm.ini, settings, history). Your answer is remembered; change it
      later with: python3 mb_anki.py savedir <path>
   3. python3 mb_anki.py hmm-init
-     Then fill in the 'actor' column of actors.csv and the 'set' column of
-     sets.csv (in your save directory) with your own people and places.
+     Creates the 'MB Component' note type in Anki (if missing) and writes
+     hmm.ini (tone rooms + syllable-split corrections) to your save directory.
+  4. python3 mb_anki.py shell
+     The first run asks which deck holds your props/actors/sets.
 
 Daily use
 ---------
@@ -24,16 +30,18 @@ Daily use
       character  pinyin  ·  meaning
       cast / location / room / props, then a prompt for the script.
 
-  Anything missing from your CSVs is offered as a prompt: type a value to
-  save it, press enter to skip it, or q to abandon the card. You can equally
-  edit mb_config/*.csv by hand - they are re-read on every lookup.
+  Anything missing from your component deck is offered as a prompt: type a
+  value to save it as a new note there, press enter to skip it, or q to
+  abandon the card.
 
 Other commands
 --------------
-  inspect     list your decks, note types and field names
-  hmm-init    create the config CSVs
-  hmm-check   preview the scaffolding for a whole word list, changing nothing
-  add FILE    bulk-import a word list without prompting
+  inspect        list your decks, note types and field names
+  hmm-init       create the 'MB Component' note type and hmm.ini
+  hmm-check      preview the scaffolding for a whole word list, changing nothing
+  add FILE       bulk-import a word list without prompting
+  migrate-props  one-off: push old actors.csv/sets.csv/props.csv into the component deck
+  syllables      print the full computed initial/final split (--diff for overrides only)
 
 No third-party packages. Python 3.8+.
 """
@@ -42,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import configparser
 import csv
 import gzip
 import hashlib
@@ -60,6 +69,8 @@ CACHE_DIR = os.path.join(os.path.expanduser("~"), ".mb_anki")
 CEDICT_CACHE = os.path.join(CACHE_DIR, "cedict.txt")
 IDS_URL = "https://raw.githubusercontent.com/cjkvi/cjkvi-ids/master/ids.txt"
 APP_CONFIG_PATH = os.path.join(CACHE_DIR, "app_config.json")
+COMPONENT_MODEL = "MB Component"
+DEFAULT_COMPONENT_DECK = "mandarin-blueprint-imports-actors-sets-props"
 
 # Field-name synonyms used to auto-map our data onto your note type.
 # First match wins, case-insensitive. Override with --map.
@@ -77,6 +88,13 @@ FIELD_SYNONYMS = {
     "initial": ["initial", "initials"],
     "final": ["final", "finals"],
     "tone": ["tone", "tone number"],
+}
+
+# Field-name synonyms for the component deck (props/actors/sets note type).
+COMPONENT_FIELD_SYNONYMS = {
+    "kind": ["kind", "type"],
+    "key": ["key", "id"],
+    "value": ["value", "name", "meaning"],
 }
 
 TONE_MARKS = {
@@ -315,25 +333,148 @@ def load_csv_map(path, key_col=0, val_col=1):
     return out
 
 
+def load_hmm_ini(cfg_dir):
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    path = os.path.join(cfg_dir, "hmm.ini")
+    if os.path.exists(path):
+        cp.read(path, encoding="utf-8")
+    return cp
+
+
+def write_hmm_ini(path, rooms, overrides):
+    lines = ["# Which room in the set each tone happens in.", "[rooms]"]
+    for tone, room in sorted(rooms.items()):
+        lines.append(f"{tone} = {room}")
+    lines += [
+        "",
+        "# Corrections to the computed initial/final split, as: syllable = actor, set",
+        "# Only syllables where the built-in rule is wrong need to be listed here.",
+        "# Anything absent falls back to split_syllable().",
+        "[syllables]",
+    ]
+    for syl, (actor, set_) in sorted(overrides.items()):
+        lines.append(f"{syl} = {actor}, {set_}")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def resolve_component_deck(cfg_dir, explicit=None):
+    if explicit:
+        return explicit
+    return load_settings(cfg_dir).get("component_deck", DEFAULT_COMPONENT_DECK)
+
+
+def ensure_component_model():
+    if COMPONENT_MODEL in invoke("modelNames"):
+        return
+    invoke("createModel", modelName=COMPONENT_MODEL,
+           inOrderFields=["Kind", "Key", "Value"],
+           css=".card { font-family: arial; font-size: 20px; text-align: center; }",
+           cardTemplates=[{
+               "Name": "Card 1",
+               "Front": "{{Kind}}: {{Key}}",
+               "Back": "{{FrontSide}}<hr id=answer>{{Value}}",
+           }])
+
+
+class ComponentStore:
+    """Fronts the component deck: your props/actors/sets live there as notes,
+    one per (kind, key). Loaded once per session; add() refreshes in place
+    so nothing re-queries Anki on every keystroke."""
+
+    def __init__(self, deck):
+        self.deck = deck
+        if deck not in invoke("deckNames"):
+            raise SystemExit(
+                f"Component deck '{deck}' not found in Anki.\n"
+                f"Change it with: python3 mb_anki.py shell   (then 'component-deck')"
+            )
+        try:
+            fields = invoke("modelFieldNames", modelName=COMPONENT_MODEL)
+        except RuntimeError as exc:
+            raise SystemExit(
+                f"Note type '{COMPONENT_MODEL}' not found in Anki ({exc}).\n"
+                f"Run: python3 mb_anki.py hmm-init"
+            )
+        self.mapping = auto_map(fields, {}, COMPONENT_FIELD_SYNONYMS)
+        missing = [f for f in ("kind", "key", "value") if f not in self.mapping]
+        if missing:
+            raise SystemExit(
+                f"Note type '{COMPONENT_MODEL}' has no field that looks like "
+                f"{', '.join(missing)}. Fields: {fields}"
+            )
+        self._data = {"actor": {}, "set": {}, "prop": {}}
+        self._note_ids = {}
+        self._load()
+
+    def _load(self):
+        self._data = {"actor": {}, "set": {}, "prop": {}}
+        self._note_ids = {}
+        ids = invoke("findNotes", query=f'deck:"{self.deck}" note:"{COMPONENT_MODEL}"')
+        if not ids:
+            return
+        for note in invoke("notesInfo", notes=ids):
+            kind = note["fields"].get(self.mapping["kind"], {}).get("value", "").strip().lower()
+            key = note["fields"].get(self.mapping["key"], {}).get("value", "").strip()
+            value = note["fields"].get(self.mapping["value"], {}).get("value", "").strip()
+            if kind not in self._data or not key:
+                continue
+            self._data[kind][key] = value
+            self._note_ids[(kind, key)] = note["noteId"]
+
+    def actors(self):
+        return self._data["actor"]
+
+    def sets(self):
+        return self._data["set"]
+
+    def props(self):
+        return self._data["prop"]
+
+    def actor(self, key):
+        return self._data["actor"].get(key)
+
+    def set(self, key):
+        return self._data["set"].get(key)
+
+    def prop(self, component):
+        return self._data["prop"].get(component)
+
+    def has(self, kind, key):
+        return key in self._data.get(kind, {})
+
+    def add(self, kind, key, value):
+        if self.has(kind, key):
+            raise ValueError(f"{kind} '{key}' already exists in the component deck")
+        fields = {self.mapping["kind"]: kind, self.mapping["key"]: key,
+                  self.mapping["value"]: value}
+        invoke("addNote", note={"deckName": self.deck, "modelName": COMPONENT_MODEL,
+                                "fields": fields, "tags": [kind.capitalize()],
+                                "options": {"allowDuplicate": False}})
+        self._data[kind][key] = value
+
+
 class HMM:
     """Your personal actor / set / room / prop assignments."""
 
-    def __init__(self, cfg_dir):
+    def __init__(self, cfg_dir, store):
         self.dir = cfg_dir
-        self.actors = load_csv_map(os.path.join(cfg_dir, "actors.csv"))
-        self.sets = load_csv_map(os.path.join(cfg_dir, "sets.csv"))
-        self.props = load_csv_map(os.path.join(cfg_dir, "props.csv"))
-        rooms = load_csv_map(os.path.join(cfg_dir, "rooms.csv"))
-        self.rooms = {int(k): v for k, v in rooms.items() if k.isdigit()} or DEFAULT_ROOMS
+        self.store = store
+        self.actors = store.actors()
+        self.sets = store.sets()
+        self.props = store.props()
+        cp = load_hmm_ini(cfg_dir)
+        if cp.has_section("rooms") and cp.items("rooms"):
+            self.rooms = {int(k): v for k, v in cp.items("rooms") if k.isdigit()}
+        else:
+            self.rooms = dict(DEFAULT_ROOMS)
         self.overrides = {}
-        ov = os.path.join(cfg_dir, "syllables.csv")
-        if os.path.exists(ov):
-            with open(ov, encoding="utf-8-sig", newline="") as fh:
-                for row in csv.reader(fh):
-                    if len(row) >= 3 and row[0].strip() and not row[0].startswith("#"):
-                        if row[0].strip() == "syllable":
-                            continue
-                        self.overrides[row[0].strip()] = (row[1].strip(), row[2].strip())
+        if cp.has_section("syllables"):
+            for syl, val in cp.items("syllables"):
+                parts = [p.strip() for p in val.split(",", 1)]
+                if len(parts) == 2:
+                    self.overrides[syl.strip()] = (parts[0], parts[1])
         self.ids = load_ids(os.path.join(cfg_dir, "ids.txt"))
         self.unknown_props = set()
         self.unknown_actors = set()
@@ -480,10 +621,11 @@ def fetch_audio(text: str) -> bytes | None:
 # Mapping our data onto the user's note type
 # --------------------------------------------------------------------------
 
-def auto_map(note_fields: list[str], overrides: dict[str, str]) -> dict[str, str]:
+def auto_map(note_fields: list[str], overrides: dict[str, str],
+             synonyms: dict[str, list[str]] = FIELD_SYNONYMS) -> dict[str, str]:
     lowered = {f.lower(): f for f in note_fields}
     mapping = {}
-    for key, syns in FIELD_SYNONYMS.items():
+    for key, syns in synonyms.items():
         if key in overrides:
             target = overrides[key]
             if target not in note_fields:
@@ -524,12 +666,8 @@ def parse_input(path: str):
 # Commands
 # --------------------------------------------------------------------------
 
-def cmd_hmm_init(args):
-    os.makedirs(args.config, exist_ok=True)
-    ensure_ids(args.config)
-    entries, _ = load_cedict(ensure_cedict(args.cedict))
-
-    # Every syllable that actually occurs in Chinese, with its computed split.
+def all_syllables(entries):
+    """Every syllable that actually occurs in Chinese, with its computed split."""
     seen = {}
     for cands in entries.values():
         for e in cands:
@@ -538,51 +676,71 @@ def cmd_hmm_init(args):
                 if not m:
                     continue
                 base = m.group(1).lower().replace("u:", "ü").replace("v", "ü")
+                if base in seen:
+                    continue
                 r = split_syllable(syl)
-                if r and base not in seen:
+                if r:
                     seen[base] = r
+    return seen
 
-    actors, sets_ = {}, {}
-    for base, (a, s_, _t) in seen.items():
-        actors.setdefault(a, []).append(base)
-        sets_.setdefault(s_, []).append(base)
 
-    def rank(a):
-        return (0 if a == NULL else 1, len(a), a)
+def cmd_hmm_init(args):
+    os.makedirs(args.config, exist_ok=True)
+    ensure_ids(args.config)
+    ensure_component_model()
+    entries, _ = load_cedict(ensure_cedict(args.cedict))
+    seen = all_syllables(entries)
 
-    def write(name, header, rows):
-        path = os.path.join(args.config, name)
-        if os.path.exists(path) and not args.force:
-            print(f"  kept   {name} (exists; --force to overwrite)")
-            return
-        with open(path, "w", encoding="utf-8", newline="") as fh:
-            w = csv.writer(fh)
-            w.writerow(header)
-            w.writerows(rows)
-        print(f"  wrote  {name}  ({len(rows)} rows)")
+    ini_path = os.path.join(args.config, "hmm.ini")
+    if os.path.exists(ini_path) and not args.force:
+        print(f"  kept   hmm.ini (exists; --force to overwrite)")
+    else:
+        rooms = dict(DEFAULT_ROOMS)
+        migrated_rooms = 0
+        legacy_rooms = os.path.join(args.config, "rooms.csv")
+        if os.path.exists(legacy_rooms):
+            old_rooms = load_csv_map(legacy_rooms)
+            old_rooms = {int(k): v for k, v in old_rooms.items() if k.isdigit()}
+            if old_rooms:
+                rooms = old_rooms
+                migrated_rooms = len(old_rooms)
 
-    write("actors.csv", ["key", "actor", "example syllables"],
-          [[k if k != NULL else NULL, "",
-            " ".join(sorted(v)[:6]) + (" ..." if len(v) > 6 else "")]
-           for k, v in sorted(actors.items(), key=lambda kv: rank(kv[0]))])
-    write("sets.csv", ["key", "set", "example syllables"],
-          [[k, "", " ".join(sorted(v)[:6]) + (" ..." if len(v) > 6 else "")]
-           for k, v in sorted(sets_.items(), key=lambda kv: rank(kv[0]))])
-    write("rooms.csv", ["tone", "room"], [[t, r] for t, r in sorted(DEFAULT_ROOMS.items())])
-    write("props.csv", ["component", "prop"], [["\u53e3", ""], ["\u516b", ""]])
-    write("syllables.csv", ["syllable", "actor_key", "set_key"],
-          [[b, a, s_] for b, (a, s_, _t) in sorted(seen.items())])
+        overrides = {}
+        migrated_syl = 0
+        legacy_syllables = os.path.join(args.config, "syllables.csv")
+        if os.path.exists(legacy_syllables):
+            with open(legacy_syllables, encoding="utf-8-sig", newline="") as fh:
+                for row in csv.reader(fh):
+                    if len(row) < 3 or not row[0].strip() or row[0].startswith("#"):
+                        continue
+                    if row[0].strip() == "syllable":
+                        continue
+                    syl, a, s_ = row[0].strip(), row[1].strip(), row[2].strip()
+                    if not a or not s_:
+                        continue
+                    computed = seen.get(syl)
+                    if computed and (a, s_) == (computed[0], computed[1]):
+                        continue          # agrees with split_syllable() - no override needed
+                    overrides[syl] = (a, s_)
+                    migrated_syl += 1
+
+        write_hmm_ini(ini_path, rooms, overrides)
+        print(f"  wrote  hmm.ini")
+        if migrated_rooms or migrated_syl:
+            print(f"  migrated {migrated_rooms} room(s) and {migrated_syl} syllable "
+                  f"override(s) from rooms.csv / syllables.csv into hmm.ini")
+            print(f"  (old files left on disk - delete them yourself once you're happy)")
 
     print(f"""
 Config is in {args.config}/ . Next:
 
-  1. actors.csv  - fill the 'actor' column ({len(actors)} keys). '{NULL}' = null initial.
-  2. sets.csv    - fill the 'set' column ({len(sets_)} keys). '{NULL}' = null final (childhood home).
-  3. rooms.csv   - adjust if your tone rooms differ from the defaults.
-  4. props.csv   - add 'component,prop' rows as you learn them.
-  5. syllables.csv is the computed initial/final split for all {len(seen)} syllables.
-     Spot-check it against your MB pinyin chart and edit any row that disagrees;
-     it overrides the built-in rules from then on.
+  1. Your props, actors and sets live in Anki now, in the component deck
+     (note type '{COMPONENT_MODEL}'). Run 'shell' once to pick which deck
+     that is; anything missing is offered as a prompt as you go.
+  2. hmm.ini has your tone rooms and any syllable-split corrections.
+     Spot-check the full computed table ({len(seen)} syllables) against your
+     MB pinyin chart with:  python3 mb_anki.py syllables
+     Only rows that disagree with it need adding to hmm.ini's [syllables].
 
 Then:  python mb_anki.py hmm-check words.txt""")
 
@@ -632,26 +790,6 @@ def yes(text, default=True):
     return val.startswith("y")
 
 
-def set_csv_value(path, key, value, header):
-    """Update one cell without clobbering the other columns."""
-    rows = []
-    if os.path.exists(path):
-        with open(path, encoding="utf-8-sig", newline="") as fh:
-            rows = [r for r in csv.reader(fh) if r]
-    if not rows:
-        rows = [list(header)]
-    for row in rows[1:]:
-        if row[0].strip() == key:
-            while len(row) < 2:
-                row.append("")
-            row[1] = value
-            break
-    else:
-        rows.append([key, value] + [""] * max(0, len(rows[0]) - 2))
-    with open(path, "w", encoding="utf-8", newline="") as fh:
-        csv.writer(fh).writerows(rows)
-
-
 def choose(title, options, current=None):
     if current in options:
         return current
@@ -694,53 +832,54 @@ def show_card(word, entry, scene, props, examples, duplicate):
     print()
 
 
-def fill_gaps(word, hmm, scene, props, cfg):
+def fill_gaps(word, hmm, scene, props):
     """Offer to name anything that has no entry yet. 'q' abandons the card."""
     gaps = []
     if hmm.unknown_actors:
         for k in sorted(hmm.unknown_actors):
-            gaps.append(("actor", k, "actors.csv", ["key", "actor", "example syllables"],
-                         f"  who plays {C['bold']}{k}{C['off']}? "))
+            gaps.append(("actor", k, f"  who plays {C['bold']}{k}{C['off']}? "))
     if hmm.unknown_sets:
         for k in sorted(hmm.unknown_sets):
             label = "the null final" if k == NULL else f"-{k}"
-            gaps.append(("set", k, "sets.csv", ["key", "set", "example syllables"],
-                         f"  which place is {C['bold']}{label}{C['off']}? "))
+            gaps.append(("set", k, f"  which place is {C['bold']}{label}{C['off']}? "))
     for p in props:
         if not p["prop"]:
-            gaps.append(("prop", p["component"], "props.csv", ["component", "prop"],
+            gaps.append(("prop", p["component"],
                          f"  prop for {C['bold']}{p['component']}{C['off']}? "))
     if not gaps:
         return False
 
-    print(f"  {C['yellow']}{len(gaps)} thing(s) not in your CSVs yet.{C['off']}")
+    print(f"  {C['yellow']}{len(gaps)} thing(s) not in your component deck yet.{C['off']}")
     if not yes("  fill them in now?"):
         return False
     print(f"  {C['dim']}enter = skip this one, q = abandon this card{C['off']}")
 
     changed = False
-    for kind, key, fname, header, prompt in gaps:
+    for kind, key, prompt in gaps:
         val = ask(prompt)
         if not val:
             continue
-        path = os.path.join(cfg, fname)
-        set_csv_value(path, key, val, header)
-        print(f"  {C['green']}saved{C['off']} {C['dim']}{key} -> {fname}{C['off']}")
+        if hmm.store.has(kind, key):
+            print(f"  {C['dim']}{key} is already in the component deck, skipping{C['off']}")
+            continue
+        hmm.store.add(kind, key, val)
+        print(f"  {C['green']}saved{C['off']} {C['dim']}{key} -> component deck{C['off']}")
         changed = True
     return changed
 
 
 SHELL_HELP = """
-  <character>   look it up and build a card
-  <word>        several characters are treated as one word if it's in the
-                dictionary, otherwise queued one character at a time
-  deck          change the target deck
-  note          change the note type
-  audio         toggle downloading pronunciation audio
-  where         print the paths of your CSVs
-  savedir       show the save directory (change it with: mb_anki.py savedir <path>)
-  ?             this help
-  q             quit
+  <character>     look it up and build a card
+  <word>          several characters are treated as one word if it's in the
+                  dictionary, otherwise queued one character at a time
+  deck            change the target deck
+  note            change the note type
+  component-deck  change which deck holds your props/actors/sets
+  audio           toggle downloading pronunciation audio
+  where           print the paths of your config and component deck
+  savedir         show the save directory (change it with: mb_anki.py savedir <path>)
+  ?               this help
+  q               quit
 
   At any prompt: enter accepts the default, q abandons the card, ctrl-d quits.
 """
@@ -768,8 +907,12 @@ def cmd_shell(args):
     models = sorted(invoke("modelNames"))
     deck = args.deck or choose("Which deck?", decks, settings.get("deck"))
     note_type = args.note_type or choose("Which note type?", models, settings.get("note_type"))
+    component_deck = args.component_deck or choose(
+        "Which deck holds your props/actors/sets?", decks,
+        settings.get("component_deck", DEFAULT_COMPONENT_DECK))
     audio = args.audio or settings.get("audio", False)
-    save_settings(cfg, {"deck": deck, "note_type": note_type, "audio": audio})
+    save_settings(cfg, {"deck": deck, "note_type": note_type,
+                         "component_deck": component_deck, "audio": audio})
 
     mapping, note_fields = None, None
     try:
@@ -781,10 +924,12 @@ def cmd_shell(args):
         raise SystemExit(f"No field on '{note_type}' looks like the character field.\n"
                          f"Fields: {note_fields}")
 
-    hmm0 = HMM(cfg)
+    store = ComponentStore(component_deck)
+    hmm = HMM(cfg, store)
     print(f"\n  {C['bold']}Hanzi Movie Method{C['off']}  {C['dim']}·  "
-          f"{len(hmm0.actors)} actors, {len(hmm0.sets)} sets, {len(hmm0.props)} props{C['off']}")
+          f"{len(hmm.actors)} actors, {len(hmm.sets)} sets, {len(hmm.props)} props{C['off']}")
     print(f"  {C['dim']}deck{C['off']} {deck}   {C['dim']}note{C['off']} {note_type}"
+          f"   {C['dim']}component deck{C['off']} {component_deck}"
           f"   {C['dim']}audio{C['off']} {'on' if audio else 'off'}")
     print(f"  {C['dim']}? for help, q to quit{C['off']}")
 
@@ -817,14 +962,21 @@ def cmd_shell(args):
                     known, existing = collection_state(note_type, mapping["hanzi"])
                     save_settings(cfg, {"note_type": note_type})
                     continue
+                if low == "component-deck":
+                    component_deck = choose("Which deck holds your props/actors/sets?",
+                                             sorted(invoke("deckNames")))
+                    store = ComponentStore(component_deck)
+                    hmm = HMM(cfg, store)
+                    save_settings(cfg, {"component_deck": component_deck})
+                    continue
                 if low == "audio":
                     audio = not audio
                     save_settings(cfg, {"audio": audio})
                     print(f"  audio {'on' if audio else 'off'}")
                     continue
                 if low == "where":
-                    for f in ("actors.csv", "sets.csv", "rooms.csv", "props.csv", "syllables.csv"):
-                        print(f"  {os.path.abspath(os.path.join(cfg, f))}")
+                    print(f"  {os.path.abspath(os.path.join(cfg, 'hmm.ini'))}")
+                    print(f"  component deck: {component_deck}")
                     continue
                 if low == "savedir":
                     print(f"  {os.path.abspath(cfg)}")
@@ -841,7 +993,7 @@ def cmd_shell(args):
                     queue = chars[1:]
                     word = chars[0]
 
-            build_one(word, entries, contains, known, existing, cfg,
+            build_one(word, entries, contains, known, existing, hmm,
                       deck, note_type, mapping, audio)
 
         except Cancel:
@@ -871,7 +1023,7 @@ def collection_state(note_type, hanzi_field):
     return known, words
 
 
-def build_one(word, entries, contains, known, existing, cfg,
+def build_one(word, entries, contains, known, existing, hmm,
               deck, note_type, mapping, audio):
     entry = lookup(entries, word)
     if not entry:
@@ -879,7 +1031,10 @@ def build_one(word, entries, contains, known, existing, cfg,
         return
 
     def compute():
-        hmm = HMM(cfg)                      # re-read the CSVs on every pass
+        # hmm.actors/sets/props are live references into the ComponentStore's
+        # cache, so this re-reads nothing from Anki - just recomputes the
+        # scene/props against whatever is in that cache right now.
+        hmm.unknown_actors, hmm.unknown_sets, hmm.unknown_props = set(), set(), set()
         scene = hmm.scene(entry["pinyin"])
         props, seen = [], set()
         for ch in word:
@@ -887,15 +1042,15 @@ def build_one(word, entries, contains, known, existing, cfg,
                 if comp not in seen:
                     seen.add(comp)
                     props.append({"component": comp, "prop": hmm.props.get(comp, "")})
-        return hmm, scene, props
+        return scene, props
 
-    hmm, scene, props = compute()
+    scene, props = compute()
     examples = build_examples(word, entries, contains, known)
     show_card(word, entry, scene, props, examples, word in existing)
 
     # Asked once. Anything skipped here stays skipped for this card.
-    if fill_gaps(word, hmm, scene, props, cfg):
-        hmm, scene, props = compute()
+    if fill_gaps(word, hmm, scene, props):
+        scene, props = compute()
         show_card(word, entry, scene, props, examples, word in existing)
 
     movie = ask(f"  {C['dim']}script{C['off']} ")
@@ -1028,7 +1183,8 @@ def pad(text, width):
 
 
 def cmd_hmm_check(args):
-    hmm = HMM(args.config)
+    component_deck = resolve_component_deck(args.config, args.component_deck)
+    hmm = HMM(args.config, ComponentStore(component_deck))
     entries, _ = load_cedict(ensure_cedict(args.cedict))
     print(pad("char", 6) + pad("pinyin", 12) + pad("actor", 22)
           + pad("set", 26) + pad("room", 24) + "props")
@@ -1049,13 +1205,13 @@ def cmd_hmm_check(args):
 def report_gaps(hmm):
     if hmm.unknown_actors:
         print(f"\n! No actor set for: {', '.join(sorted(hmm.unknown_actors))}"
-              f"  -> add to {hmm.dir}/actors.csv")
+              f"  -> add to the component deck ({hmm.store.deck})")
     if hmm.unknown_sets:
         print(f"! No set for: {', '.join(sorted(hmm.unknown_sets))}"
-              f"  -> add to {hmm.dir}/sets.csv")
+              f"  -> add to the component deck ({hmm.store.deck})")
     if hmm.unknown_props:
         print(f"! No prop for: {' '.join(sorted(hmm.unknown_props))}"
-              f"  -> add to {hmm.dir}/props.csv")
+              f"  -> add to the component deck ({hmm.store.deck})")
 
 
 def cmd_inspect(_args):
@@ -1111,9 +1267,14 @@ def cmd_add(args):
                 existing_words.add(val)
                 known.update(HANZI_RE.findall(val))
 
-    hmm = HMM(args.config) if not args.no_hmm else None
-    if hmm and not hmm.actors:
-        sys.stderr.write(f"Note: no actors.csv in {args.config}/ - run 'hmm-init' first.\n\n")
+    hmm = None
+    if not args.no_hmm:
+        component_deck = resolve_component_deck(args.config, args.component_deck)
+        hmm = HMM(args.config, ComponentStore(component_deck))
+        if not hmm.actors and not hmm.sets:
+            sys.stderr.write(
+                f"Note: the component deck ({component_deck}) has no "
+                f"actors/sets in it yet.\n\n")
     entries, contains = load_cedict(ensure_cedict(args.cedict))
     items = parse_input(args.input)
     print(f"{len(items)} item(s) in {args.input}; {len(existing_words)} already in collection.\n")
@@ -1194,6 +1355,64 @@ def cmd_add(args):
         invoke("sync")
 
 
+def cmd_migrate_props(args):
+    """One-off: push actors.csv/sets.csv/props.csv into the component deck."""
+    component_deck = resolve_component_deck(args.config, args.component_deck)
+    ensure_component_model()
+    store = ComponentStore(component_deck)
+
+    created = skipped = 0
+    for kind, fname in (("actor", "actors.csv"), ("set", "sets.csv"), ("prop", "props.csv")):
+        data = load_csv_map(os.path.join(args.config, fname))
+        for key, value in sorted(data.items()):
+            if store.has(kind, key):
+                skipped += 1
+                continue
+            verb = "would add" if args.dry_run else "add"
+            print(f"{verb}  {pad(kind, 6)}{pad(key, 8)}{value}")
+            if not args.dry_run:
+                store.add(kind, key, value)
+            created += 1
+
+    verb = "would create" if args.dry_run else "created"
+    print(f"\n{verb} {created}, already present {skipped}")
+
+
+def cmd_syllables(args):
+    entries, _ = load_cedict(ensure_cedict(args.cedict))
+    cp = load_hmm_ini(args.config)
+    overrides = {}
+    if cp.has_section("syllables"):
+        for syl, val in cp.items("syllables"):
+            parts = [p.strip() for p in val.split(",", 1)]
+            if len(parts) == 2:
+                overrides[syl.strip()] = (parts[0], parts[1])
+
+    computed = all_syllables(entries)
+    rows = []
+    for base, (a, s_, _t) in computed.items():
+        if base in overrides:
+            oa, os_ = overrides[base]
+            rows.append((base, oa, os_, True))
+        else:
+            rows.append((base, a, s_, False))
+
+    if args.diff:
+        rows = [r for r in rows if r[3]]
+        if not rows:
+            print("no overrides in hmm.ini")
+            return
+
+    def rank(row):
+        base, a, _s, _o = row
+        return (0 if a == NULL else 1, len(a), a, base)
+
+    print(pad("syllable", 12) + pad("actor", 8) + pad("set", 8) + "override")
+    print("-" * 40)
+    for base, a, s_, is_override in sorted(rows, key=rank):
+        print(pad(base, 12) + pad(a, 8) + pad(s_, 8) + ("yes" if is_override else ""))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1201,19 +1420,21 @@ def main():
 
     sub.add_parser("inspect", help="list decks, note types and field names")
 
-    i = sub.add_parser("hmm-init", help="create your actor/set/room/prop config files")
+    i = sub.add_parser("hmm-init", help="create the component note type and hmm.ini")
     i.add_argument("--config", default=None)
     i.add_argument("--cedict")
-    i.add_argument("--force", action="store_true", help="overwrite existing config files")
+    i.add_argument("--force", action="store_true", help="overwrite an existing hmm.ini")
 
     c = sub.add_parser("hmm-check", help="preview the scaffolding for a word list")
     c.add_argument("input")
     c.add_argument("--config", default=None)
     c.add_argument("--cedict")
+    c.add_argument("--component-deck", help="deck holding your props/actors/sets")
 
     sh = sub.add_parser("shell", help="type characters in, one at a time (the usual way in)")
     sh.add_argument("--deck")
     sh.add_argument("--note-type")
+    sh.add_argument("--component-deck", help="deck holding your props/actors/sets")
     sh.add_argument("--audio", action="store_true")
     sh.add_argument("--config", default=None)
     sh.add_argument("--cedict")
@@ -1222,6 +1443,7 @@ def main():
     a.add_argument("input", help="text file, one hanzi/word per line")
     a.add_argument("--deck", required=True)
     a.add_argument("--note-type", required=True)
+    a.add_argument("--component-deck", help="deck holding your props/actors/sets")
     a.add_argument("--map", nargs="*", metavar="key=Field",
                    help="override auto field mapping, e.g. hanzi=Character meaning=Keyword")
     a.add_argument("--audio", action="store_true", help="download TTS audio")
@@ -1239,11 +1461,24 @@ def main():
     sd = sub.add_parser("savedir", help="show or change where mb_anki keeps its files")
     sd.add_argument("path", nargs="?", help="new save directory (omit to just show current)")
 
+    mp = sub.add_parser("migrate-props",
+                        help="one-off: push actors/sets/props CSVs into the component deck")
+    mp.add_argument("--config", default=None)
+    mp.add_argument("--component-deck", help="deck holding your props/actors/sets")
+    mp.add_argument("--dry-run", action="store_true")
+
+    sy = sub.add_parser("syllables", help="print the computed initial/final split")
+    sy.add_argument("--config", default=None)
+    sy.add_argument("--cedict")
+    sy.add_argument("--diff", action="store_true", help="only rows overridden in hmm.ini")
+
     args = p.parse_args(sys.argv[1:] or ["shell"])
     if hasattr(args, "config"):
         args.config = resolve_config_dir(args.config)
     {"inspect": cmd_inspect, "hmm-init": cmd_hmm_init, "hmm-check": cmd_hmm_check,
-     "shell": cmd_shell, "add": cmd_add, "savedir": cmd_savedir}[args.cmd](args)
+     "shell": cmd_shell, "add": cmd_add, "savedir": cmd_savedir,
+     "migrate-props": cmd_migrate_props,
+     "syllables": cmd_syllables}[args.cmd](args)
 
 
 if __name__ == "__main__":
