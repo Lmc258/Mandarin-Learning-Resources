@@ -66,6 +66,7 @@ import html
 import json
 import os
 import re
+import socket
 import sys
 import time
 import unicodedata
@@ -207,17 +208,32 @@ def numbered_to_marks(pinyin: str) -> str:
 
 def download(url, timeout=180, retries=3):
     """GET a URL, retrying on timeouts/connection hiccups before giving up
-    with a plain sentence instead of a raw traceback."""
+    with a plain sentence instead of a raw traceback.
+
+    Forces IPv4: some networks resolve a working but glacially slow (or
+    silently lossy) IPv6 route first, which urlopen's timeout doesn't
+    reliably catch since bytes keep trickling in - it just hangs for
+    minutes instead of using the fast IPv4 path that's sitting right there.
+    """
     req = urllib.request.Request(url, headers={"User-Agent": "mb_anki/1.0"})
+    real_getaddrinfo = socket.getaddrinfo
+
+    def ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return real_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
     last_exc = None
-    for attempt in range(retries):
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read()
-        except (urllib.error.URLError, OSError) as exc:
-            last_exc = exc
-            if attempt < retries - 1:
-                sys.stderr.write(f"  (retrying after: {exc})\n")
+    socket.getaddrinfo = ipv4_getaddrinfo
+    try:
+        for attempt in range(retries):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return resp.read()
+            except (urllib.error.URLError, OSError) as exc:
+                last_exc = exc
+                if attempt < retries - 1:
+                    sys.stderr.write(f"  (retrying after: {exc})\n")
+    finally:
+        socket.getaddrinfo = real_getaddrinfo
     raise SystemExit(f"Couldn't download {url} ({last_exc}). Check your connection and try again.")
 
 
@@ -617,7 +633,7 @@ def ensure_ids(cfg_dir):
     path = os.path.join(cfg_dir, "ids.txt")
     if os.path.exists(path):
         return path
-    sys.stderr.write("Downloading character decomposition data (one time, ~10 MB)...\n")
+    sys.stderr.write("Downloading character decomposition data (one time, ~2 MB)...\n")
     data = download(IDS_URL)
     with open(path, "wb") as fh:
         fh.write(data)
