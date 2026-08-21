@@ -514,10 +514,14 @@ class ComponentStore:
     def add(self, kind, key, value):
         if self.has(kind, key):
             raise ValueError(f"{kind} '{key}' already exists in the component deck")
+        # allowDuplicate: Anki's built-in check keys on the sort field, which
+        # is Kind here - only 3 possible values, so it flags every second
+        # prop/actor/set as a duplicate of the first. has() above is the
+        # real duplicate guard (scoped to this deck, keyed on kind+key).
         fields = {"Kind": kind, "Key": key, "Value": value}
         invoke("addNote", note={"deckName": self.deck, "modelName": COMPONENT_MODEL,
                                 "fields": fields, "tags": [kind.capitalize()],
-                                "options": {"allowDuplicate": False}})
+                                "options": {"allowDuplicate": True}})
         self._data[kind][key] = value
 
 
