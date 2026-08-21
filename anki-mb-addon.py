@@ -80,7 +80,9 @@ CEDICT_CACHE = os.path.join(CACHE_DIR, "cedict.txt")
 IDS_URL = "https://raw.githubusercontent.com/cjkvi/cjkvi-ids/master/ids.txt"
 APP_CONFIG_PATH = os.path.join(CACHE_DIR, "app_config.json")
 COMPONENT_MODEL = "MB Component"
-DEFAULT_COMPONENT_DECK = "mandarin-blueprint-imports-actors-sets-props"
+DEFAULT_COMPONENT_DECK = "Hanzi Movie Method Components"
+DEFAULT_WORD_DECK = "Hanzi Movie Method"
+COMPONENT_SUBDECKS = {"actor": "Actors", "set": "Sets", "prop": "Props"}
 
 # The note type this tool owns for word/character cards. Fixed, not guessed:
 # no stock Chinese note type has Actor/Set/Room/Props fields, so matching
@@ -514,12 +516,18 @@ class ComponentStore:
     def add(self, kind, key, value):
         if self.has(kind, key):
             raise ValueError(f"{kind} '{key}' already exists in the component deck")
+        # Actors/sets/props each land in their own subdeck of the component
+        # deck (Anki's own deck search already includes subdecks, so _load's
+        # deck:"<component deck>" query still sees all of them).
+        deck = f"{self.deck}::{COMPONENT_SUBDECKS[kind]}"
+        if deck not in invoke("deckNames"):
+            invoke("createDeck", deck=deck)
         # allowDuplicate: Anki's built-in check keys on the sort field, which
         # is Kind here - only 3 possible values, so it flags every second
         # prop/actor/set as a duplicate of the first. has() above is the
         # real duplicate guard (scoped to this deck, keyed on kind+key).
         fields = {"Kind": kind, "Key": key, "Value": value}
-        invoke("addNote", note={"deckName": self.deck, "modelName": COMPONENT_MODEL,
+        invoke("addNote", note={"deckName": deck, "modelName": COMPONENT_MODEL,
                                 "fields": fields, "tags": [kind.capitalize()],
                                 "options": {"allowDuplicate": True}})
         self._data[kind][key] = value
@@ -960,7 +968,7 @@ def cmd_shell(args):
     settings = load_settings(cfg)
 
     decks = sorted(invoke("deckNames"))
-    deck = args.deck or choose("Which deck?", decks, settings.get("deck"))
+    deck = args.deck or choose("Which deck?", decks, settings.get("deck", DEFAULT_WORD_DECK))
     component_deck = args.component_deck or choose(
         "Which deck holds your props/actors/sets?", decks,
         settings.get("component_deck", DEFAULT_COMPONENT_DECK))
