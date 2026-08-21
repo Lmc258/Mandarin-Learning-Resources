@@ -13,6 +13,12 @@ notes in an Anki deck of your own (the "component deck") - that deck is
 the source of truth, not a CSV. Anything missing is offered as a prompt
 and saved there as you go.
 
+Every note gets two cards: 'Recognition' (see the character, recall the
+scene) and 'Writing' (recall the character from its meaning and draw it,
+graded stroke-by-stroke). Writing practice runs fully offline - stroke
+data is looked up locally and baked into the note at add-time, not
+fetched at review time.
+
 Setup (once)
 ------------
   1. Install the AnkiConnect add-on in Anki (Tools > Add-ons > Get Add-ons,
@@ -26,7 +32,8 @@ Setup (once)
   4. python3 mb_anki.py shell
      The first run asks which deck to add cards to, and which deck holds
      your props/actors/sets. 'Hanzi Movie Method' is created (or repaired,
-     if you've since added a field here) automatically.
+     if you've since added a field or card type here) automatically, and
+     the stroke-order dataset (~30 MB) and HanziWriter library download once.
 
 Daily use
 ---------
@@ -78,6 +85,10 @@ CEDICT_URL = "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdb
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".mb_anki")
 CEDICT_CACHE = os.path.join(CACHE_DIR, "cedict.txt")
 IDS_URL = "https://raw.githubusercontent.com/cjkvi/cjkvi-ids/master/ids.txt"
+GRAPHICS_URL = "https://raw.githubusercontent.com/skishore/makemeahanzi/master/graphics.txt"
+GRAPHICS_CACHE = os.path.join(CACHE_DIR, "graphics.txt")
+HANZI_WRITER_URL = "https://cdn.jsdelivr.net/npm/hanzi-writer@3/dist/hanzi-writer.min.js"
+HANZI_WRITER_MEDIA = "_hanzi-writer.min.js"
 APP_CONFIG_PATH = os.path.join(CACHE_DIR, "app_config.json")
 COMPONENT_MODEL = "MB Component"
 DEFAULT_COMPONENT_DECK = "Hanzi Movie Method Components"
@@ -90,7 +101,7 @@ COMPONENT_SUBDECKS = {"actor": "Actors", "set": "Sets", "prop": "Props"}
 # 'Hanzi' (the sort field) is what duplicate detection keys on.
 WORD_MODEL = "Hanzi Movie Method"
 WORD_FIELDS = ["Hanzi", "Pinyin", "Meaning", "Actor", "Set", "Room", "Props",
-               "Examples", "Audio", "Initial", "Final", "Tone"]
+               "Examples", "Audio", "Initial", "Final", "Tone", "Strokes"]
 
 WORD_CSS = """\
 .card {
@@ -112,6 +123,8 @@ WORD_CSS = """\
 .scene .row { margin: 2px 0; }
 .scene .label { display: inline-block; width: 60px; color: #999; }
 .examples { font-size: 13px; color: #888; margin-top: 14px; }
+.hw-row { display: flex; justify-content: center; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+.hw-target { border: 1px solid #ddd; border-radius: 6px; }
 """
 
 WORD_FRONT = """\
@@ -130,6 +143,41 @@ WORD_BACK = """\
   <div class="row"><span class="label">props</span>{{Props}}</div>
 </div>
 {{#Examples}}<div class="examples">{{Examples}}</div>{{/Examples}}"""
+
+# Writing card: recall the character from its pinyin/meaning and draw it.
+# HanziWriter (bundled once into Anki media as _hanzi-writer.min.js) grades
+# each stroke live against data cached in the Strokes field at add-time, so
+# review works fully offline - no CDN fetch at review time.
+WRITING_FRONT = """\
+<div class="pinyin">{{Pinyin}}</div>
+<div class="meaning">{{Meaning}}</div>
+<div id="hw-row" class="hw-row"></div>
+<script src="_hanzi-writer.min.js"></script>
+<script type="application/json" id="hw-data">{{Strokes}}</script>
+<script>
+(function () {
+  var raw = document.getElementById('hw-data').textContent;
+  var data = raw ? JSON.parse(raw) : [];
+  var row = document.getElementById('hw-row');
+  data.forEach(function (entry, i) {
+    var target = document.createElement('div');
+    target.id = 'hw-target-' + i;
+    target.className = 'hw-target';
+    row.appendChild(target);
+    HanziWriter.create(target.id, entry.char, {
+      width: 140, height: 140, padding: 5,
+      showOutline: true, showCharacter: false,
+      charDataLoader: function (_c, onLoad) { onLoad(entry); },
+    }).quiz();
+  });
+})();
+</script>"""
+
+WRITING_BACK = """\
+<div class="hanzi">{{Hanzi}}</div>
+<hr id=answer>
+<div class="pinyin">{{Pinyin}}</div>
+<div class="meaning">{{Meaning}}</div>"""
 
 TONE_MARKS = {
     "a": "āáǎàa", "e": "ēéěèe", "i": "īíǐìi", "o": "ōóǒòo",
@@ -427,25 +475,46 @@ def ensure_component_model():
            }])
 
 
+def ensure_hanzi_writer_js():
+    """Bundle the HanziWriter library into Anki's media once, so the Writing
+    card's stroke quiz works with no network access at review time. The '_'
+    prefix keeps Anki's 'check media' from flagging it as unused - it's
+    referenced from template HTML, not any note field."""
+    if invoke("getMediaFilesNames", pattern=HANZI_WRITER_MEDIA):
+        return
+    data = download(HANZI_WRITER_URL, timeout=60)
+    invoke("storeMediaFile", filename=HANZI_WRITER_MEDIA, data=base64.b64encode(data).decode())
+    print(f"stored {HANZI_WRITER_MEDIA} in Anki media")
+
+
 def ensure_word_model():
-    """Create the 'Hanzi Movie Method' note type, or add any field that's
-    missing from it (e.g. because a field was added here since). Never
+    """Create the 'Hanzi Movie Method' note type, or add any field/card type
+    that's missing from it (e.g. because one was added here since). Never
     touches existing notes - only the model definition."""
     if WORD_MODEL not in invoke("modelNames"):
         invoke("createModel", modelName=WORD_MODEL, inOrderFields=WORD_FIELDS,
-               css=WORD_CSS, cardTemplates=[{
-                   "Name": "Recognition", "Front": WORD_FRONT, "Back": WORD_BACK,
-               }])
-        print(f"created note type '{WORD_MODEL}' ({len(WORD_FIELDS)} fields)")
-        return
-    fields = invoke("modelFieldNames", modelName=WORD_MODEL)
-    missing = [f for f in WORD_FIELDS if f not in fields]
-    for f in missing:
-        invoke("modelFieldAdd", modelName=WORD_MODEL, fieldName=f)
-    if missing:
-        print(f"using note type '{WORD_MODEL}' (added missing field(s): {', '.join(missing)})")
+               css=WORD_CSS, cardTemplates=[
+                   {"Name": "Recognition", "Front": WORD_FRONT, "Back": WORD_BACK},
+                   {"Name": "Writing", "Front": WRITING_FRONT, "Back": WRITING_BACK},
+               ])
+        print(f"created note type '{WORD_MODEL}' ({len(WORD_FIELDS)} fields, 2 card types)")
     else:
-        print(f"using note type '{WORD_MODEL}'")
+        fields = invoke("modelFieldNames", modelName=WORD_MODEL)
+        missing = [f for f in WORD_FIELDS if f not in fields]
+        for f in missing:
+            invoke("modelFieldAdd", modelName=WORD_MODEL, fieldName=f)
+        templates = invoke("modelTemplateNames", modelName=WORD_MODEL)
+        added_writing = "Writing" not in templates
+        if added_writing:
+            invoke("modelTemplateAdd", modelName=WORD_MODEL,
+                   template={"Name": "Writing", "Front": WRITING_FRONT, "Back": WRITING_BACK})
+        bits = []
+        if missing:
+            bits.append(f"added missing field(s): {', '.join(missing)}")
+        if added_writing:
+            bits.append("added 'Writing' card type")
+        print(f"using note type '{WORD_MODEL}'" + (f" ({'; '.join(bits)})" if bits else ""))
+    ensure_hanzi_writer_js()
 
 
 class ComponentStore:
@@ -650,6 +719,45 @@ def ensure_ids(cfg_dir):
     with open(path, "wb") as fh:
         fh.write(data)
     return path
+
+
+def ensure_graphics(path=None):
+    """Stroke-order data for the Writing card (chanind/hanzi-writer's own
+    source dataset). Cached globally like CC-CEDICT - it's generic linguistic
+    data, not tied to any one config dir."""
+    if path:
+        return path
+    if os.path.exists(GRAPHICS_CACHE):
+        return GRAPHICS_CACHE
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    sys.stderr.write("Downloading character stroke-order data (one time, ~30 MB)...\n")
+    data = download(GRAPHICS_URL, timeout=240)
+    with open(GRAPHICS_CACHE, "wb") as fh:
+        fh.write(data)
+    return GRAPHICS_CACHE
+
+
+def load_graphics(path):
+    """Return {character: {"strokes": [...], "medians": [...]}}, exactly the
+    shape HanziWriter's charDataLoader expects."""
+    out = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            out[d["character"]] = {"strokes": d["strokes"], "medians": d["medians"]}
+    return out
+
+
+def build_strokes_field(word, graphics):
+    """JSON blob of {char, strokes, medians} for each hanzi in word, embedded
+    in the Strokes field for the Writing card's quiz. Characters missing from
+    the local dataset are just left out - the card renders fewer targets
+    rather than failing."""
+    data = [{"char": ch, **graphics[ch]} for ch in HANZI_RE.findall(word) if ch in graphics]
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")) if data else ""
 
 
 # --------------------------------------------------------------------------
@@ -965,6 +1073,7 @@ def cmd_shell(args):
         pass
 
     entries, contains = load_cedict(ensure_cedict(args.cedict))
+    graphics = load_graphics(ensure_graphics(args.graphics))
     settings = load_settings(cfg)
 
     decks = sorted(invoke("deckNames"))
@@ -1039,7 +1148,7 @@ def cmd_shell(args):
                     queue = chars[1:]
                     word = chars[0]
 
-            build_one(word, entries, contains, known, existing, hmm, deck, audio)
+            build_one(word, entries, contains, known, existing, hmm, deck, audio, graphics)
 
         except Cancel:
             print(f"  {C['dim']}dropped{C['off']}")
@@ -1073,7 +1182,7 @@ def collection_state(deck):
     return known, words
 
 
-def build_one(word, entries, contains, known, existing, hmm, deck, audio):
+def build_one(word, entries, contains, known, existing, hmm, deck, audio, graphics):
     entry = lookup(entries, word)
     if not entry:
         print(f"  {C['red']}{word} isn't in CC-CEDICT.{C['off']} Add this one in Anki by hand.")
@@ -1117,6 +1226,7 @@ def build_one(word, entries, contains, known, existing, hmm, deck, audio):
                   if known_props else ""),
         "Examples": "<br>".join(examples) if examples else "",
         "Audio": "",
+        "Strokes": build_strokes_field(word, graphics),
     }
     warn_empty_fields(fields)
 
@@ -1295,6 +1405,7 @@ def cmd_add(args):
                 f"Note: the component deck ({component_deck}) has no "
                 f"actors/sets in it yet.\n\n")
     entries, contains = load_cedict(ensure_cedict(args.cedict))
+    graphics = load_graphics(ensure_graphics(args.graphics))
     items = parse_input(args.input)
     print(f"{len(items)} item(s) in {args.input}; {len(existing_words)} already in collection.\n")
 
@@ -1319,7 +1430,7 @@ def cmd_add(args):
             "Hanzi": word, "Pinyin": pinyin, "Meaning": meaning,
             "Actor": "", "Set": "", "Room": "", "Initial": "", "Final": "", "Tone": "",
             "Props": "", "Examples": "<br>".join(examples) if examples else "",
-            "Audio": "",
+            "Audio": "", "Strokes": build_strokes_field(word, graphics),
         }
 
         scene, props = {}, []
@@ -1622,6 +1733,7 @@ def main():
     sh.add_argument("--audio", action="store_true")
     sh.add_argument("--config", default=None)
     sh.add_argument("--cedict")
+    sh.add_argument("--graphics", help="path to a local stroke-data file instead of downloading")
 
     a = sub.add_parser("add", help="create notes from a word list")
     a.add_argument("input", help="text file, one hanzi/word per line")
@@ -1631,6 +1743,7 @@ def main():
     a.add_argument("--examples", type=int, default=5, help="max example words (default 5)")
     a.add_argument("--max-glosses", type=int, default=4)
     a.add_argument("--cedict", help="path to a local cedict txt instead of downloading")
+    a.add_argument("--graphics", help="path to a local stroke-data file instead of downloading")
     a.add_argument("--tag", nargs="*")
     a.add_argument("--allow-duplicates", action="store_true")
     a.add_argument("--delay", type=float, default=0.4, help="seconds between audio fetches")
