@@ -463,16 +463,21 @@ def resolve_component_deck(cfg_dir, explicit=None):
 
 
 def ensure_component_model():
-    if COMPONENT_MODEL in invoke("modelNames"):
+    if COMPONENT_MODEL not in invoke("modelNames"):
+        invoke("createModel", modelName=COMPONENT_MODEL,
+               inOrderFields=["Key", "Kind", "Value"],
+               css=".card { font-family: arial; font-size: 20px; text-align: center; }",
+               cardTemplates=[{
+                   "Name": "Card 1",
+                   "Front": "{{Kind}}: {{Key}}",
+                   "Back": "{{FrontSide}}<hr id=answer>{{Value}}",
+               }])
         return
-    invoke("createModel", modelName=COMPONENT_MODEL,
-           inOrderFields=["Kind", "Key", "Value"],
-           css=".card { font-family: arial; font-size: 20px; text-align: center; }",
-           cardTemplates=[{
-               "Name": "Card 1",
-               "Front": "{{Kind}}: {{Key}}",
-               "Back": "{{FrontSide}}<hr id=answer>{{Value}}",
-           }])
+    # Key needs to be the sort field, not Kind - Kind only has 3 values
+    # (actor/set/prop), so with it first every note looks like a duplicate
+    # of every other note of the same kind in Anki's browser/editor.
+    if invoke("modelFieldNames", modelName=COMPONENT_MODEL)[0] != "Key":
+        invoke("modelFieldReposition", modelName=COMPONENT_MODEL, fieldName="Key", index=0)
 
 
 def ensure_hanzi_writer_js():
@@ -503,7 +508,7 @@ def ensure_word_model():
         missing = [f for f in WORD_FIELDS if f not in fields]
         for f in missing:
             invoke("modelFieldAdd", modelName=WORD_MODEL, fieldName=f)
-        templates = invoke("modelTemplateNames", modelName=WORD_MODEL)
+        templates = invoke("modelTemplates", modelName=WORD_MODEL)
         added_writing = "Writing" not in templates
         if added_writing:
             invoke("modelTemplateAdd", modelName=WORD_MODEL,
@@ -591,14 +596,12 @@ class ComponentStore:
         deck = f"{self.deck}::{COMPONENT_SUBDECKS[kind]}"
         if deck not in invoke("deckNames"):
             invoke("createDeck", deck=deck)
-        # allowDuplicate: Anki's built-in check keys on the sort field, which
-        # is Kind here - only 3 possible values, so it flags every second
-        # prop/actor/set as a duplicate of the first. has() above is the
-        # real duplicate guard (scoped to this deck, keyed on kind+key).
+        # Key is the sort field (see ensure_component_model), so Anki's own
+        # duplicate check now lines up with has() above instead of fighting it.
         fields = {"Kind": kind, "Key": key, "Value": value}
         invoke("addNote", note={"deckName": deck, "modelName": COMPONENT_MODEL,
                                 "fields": fields, "tags": [kind.capitalize()],
-                                "options": {"allowDuplicate": True}})
+                                "options": {"allowDuplicate": False}})
         self._data[kind][key] = value
 
 
@@ -1077,14 +1080,20 @@ def cmd_shell(args):
     settings = load_settings(cfg)
 
     decks = sorted(invoke("deckNames"))
-    deck = args.deck or choose("Which deck?", decks, settings.get("deck", DEFAULT_WORD_DECK))
+    current_deck = settings.get("deck", DEFAULT_WORD_DECK)
+    current_component_deck = settings.get("component_deck", DEFAULT_COMPONENT_DECK)
+    # The remembered/default deck may not exist in Anki yet (e.g. a fresh
+    # setup) - choose() only lists real decks, so it has to be added here or
+    # a brand-new deck name could never be selected, first-run or not.
+    deck = args.deck or choose("Which deck?", sorted(set(decks) | {current_deck}), current_deck)
     component_deck = args.component_deck or choose(
-        "Which deck holds your props/actors/sets?", decks,
-        settings.get("component_deck", DEFAULT_COMPONENT_DECK))
+        "Which deck holds your props/actors/sets?",
+        sorted(set(decks) | {current_component_deck}), current_component_deck)
     audio = args.audio or settings.get("audio", False)
     save_settings(cfg, {"deck": deck, "component_deck": component_deck, "audio": audio})
 
     ensure_word_model()
+    ensure_component_model()
     store = ComponentStore(component_deck)
     hmm = HMM(cfg, store)
     print(f"\n  {C['bold']}Hanzi Movie Method{C['off']}  {C['dim']}·  "
@@ -1399,6 +1408,7 @@ def cmd_add(args):
     hmm = None
     if not args.no_hmm:
         component_deck = resolve_component_deck(args.config, args.component_deck)
+        ensure_component_model()
         hmm = HMM(args.config, ComponentStore(component_deck))
         if not hmm.actors and not hmm.sets:
             sys.stderr.write(
