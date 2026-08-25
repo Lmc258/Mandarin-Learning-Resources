@@ -101,7 +101,7 @@ COMPONENT_SUBDECKS = {"actor": "Actors", "set": "Sets", "prop": "Props"}
 # 'Hanzi' (the sort field) is what duplicate detection keys on.
 WORD_MODEL = "Hanzi Movie Method"
 WORD_FIELDS = ["Hanzi", "Pinyin", "Meaning", "Actor", "Set", "Room", "Props",
-               "Examples", "Audio", "Initial", "Final", "Tone", "Strokes"]
+               "Examples", "Audio", "Initial", "Final", "Tone", "Strokes", "Keyword"]
 
 WORD_CSS = """\
 .card {
@@ -113,6 +113,7 @@ WORD_CSS = """\
 .hanzi { font-size: 64px; }
 .pinyin { font-size: 22px; color: #333; margin-top: 8px; }
 .meaning { font-size: 20px; margin-bottom: 12px; }
+.keyword { font-size: 15px; color: #888; font-style: italic; margin-top: -6px; margin-bottom: 12px; }
 .scene {
   display: inline-block;
   text-align: left;
@@ -136,6 +137,7 @@ WORD_BACK = """\
 <hr id=answer>
 <div class="pinyin">{{Pinyin}}</div>
 <div class="meaning">{{Meaning}}</div>
+{{#Keyword}}<div class="keyword">{{Keyword}}</div>{{/Keyword}}
 <div class="scene">
   <div class="row"><span class="label">actor</span>{{Actor}}</div>
   <div class="row"><span class="label">set</span>{{Set}}</div>
@@ -492,32 +494,49 @@ def ensure_hanzi_writer_js():
     print(f"stored {HANZI_WRITER_MEDIA} in Anki media")
 
 
+WORD_TEMPLATES = {
+    "Recognition": {"Front": WORD_FRONT, "Back": WORD_BACK},
+    "Writing": {"Front": WRITING_FRONT, "Back": WRITING_BACK},
+}
+
+
 def ensure_word_model():
-    """Create the 'Hanzi Movie Method' note type, or add any field/card type
-    that's missing from it (e.g. because one was added here since). Never
-    touches existing notes - only the model definition."""
+    """Create the 'Hanzi Movie Method' note type, or bring an existing one in
+    line with the fields/templates defined here (e.g. a field or card type
+    added since, or template HTML edited since). Never touches existing
+    notes - only the model definition."""
     if WORD_MODEL not in invoke("modelNames"):
         invoke("createModel", modelName=WORD_MODEL, inOrderFields=WORD_FIELDS,
                css=WORD_CSS, cardTemplates=[
-                   {"Name": "Recognition", "Front": WORD_FRONT, "Back": WORD_BACK},
-                   {"Name": "Writing", "Front": WRITING_FRONT, "Back": WRITING_BACK},
+                   {"Name": name, **tpl} for name, tpl in WORD_TEMPLATES.items()
                ])
-        print(f"created note type '{WORD_MODEL}' ({len(WORD_FIELDS)} fields, 2 card types)")
+        print(f"created note type '{WORD_MODEL}' ({len(WORD_FIELDS)} fields, "
+              f"{len(WORD_TEMPLATES)} card types)")
     else:
         fields = invoke("modelFieldNames", modelName=WORD_MODEL)
         missing = [f for f in WORD_FIELDS if f not in fields]
         for f in missing:
             invoke("modelFieldAdd", modelName=WORD_MODEL, fieldName=f)
-        templates = invoke("modelTemplates", modelName=WORD_MODEL)
-        added_writing = "Writing" not in templates
-        if added_writing:
-            invoke("modelTemplateAdd", modelName=WORD_MODEL,
-                   template={"Name": "Writing", "Front": WRITING_FRONT, "Back": WRITING_BACK})
+
+        current = invoke("modelTemplates", modelName=WORD_MODEL)
+        added, changed, to_update = [], [], {}
+        for name, tpl in WORD_TEMPLATES.items():
+            if name not in current:
+                invoke("modelTemplateAdd", modelName=WORD_MODEL, template={"Name": name, **tpl})
+                added.append(name)
+            elif current[name].get("Front") != tpl["Front"] or current[name].get("Back") != tpl["Back"]:
+                to_update[name] = tpl
+                changed.append(name)
+        if to_update:
+            invoke("updateModelTemplates", model={"name": WORD_MODEL, "templates": to_update})
+
         bits = []
         if missing:
             bits.append(f"added missing field(s): {', '.join(missing)}")
-        if added_writing:
-            bits.append("added 'Writing' card type")
+        if added:
+            bits.append(f"added card type(s): {', '.join(added)}")
+        if changed:
+            bits.append(f"updated card type(s): {', '.join(changed)}")
         print(f"using note type '{WORD_MODEL}'" + (f" ({'; '.join(bits)})" if bits else ""))
     ensure_hanzi_writer_js()
 
@@ -1037,8 +1056,9 @@ def known_scene_value(value):
 
 def warn_empty_fields(fields, indent="  "):
     """Say so out loud if a field we always try to fill came out blank.
-    Audio is excluded - it's legitimately empty whenever audio is off."""
-    blank = [f for f in WORD_FIELDS if f != "Audio" and not fields.get(f)]
+    Audio and Keyword are excluded - Audio is legitimately empty whenever
+    audio is off, and Keyword is a manual, entirely optional note."""
+    blank = [f for f in WORD_FIELDS if f not in ("Audio", "Keyword") and not fields.get(f)]
     if blank:
         print(f"{indent}{C['yellow']}warning: empty field(s): {', '.join(blank)}{C['off']}")
     return blank
@@ -1220,6 +1240,8 @@ def build_one(word, entries, contains, known, existing, hmm, deck, audio, graphi
         scene, props = compute()
         show_card(word, entry, scene, props, examples, word in existing)
 
+    keyword = ask("  keyword/note (optional, your own memory hook)? ")
+
     known_props = [p for p in props if p["prop"]]
     fields = {
         "Hanzi": word,
@@ -1236,6 +1258,7 @@ def build_one(word, entries, contains, known, existing, hmm, deck, audio, graphi
         "Examples": "<br>".join(examples) if examples else "",
         "Audio": "",
         "Strokes": build_strokes_field(word, graphics),
+        "Keyword": keyword,
     }
     warn_empty_fields(fields)
 
@@ -1440,7 +1463,7 @@ def cmd_add(args):
             "Hanzi": word, "Pinyin": pinyin, "Meaning": meaning,
             "Actor": "", "Set": "", "Room": "", "Initial": "", "Final": "", "Tone": "",
             "Props": "", "Examples": "<br>".join(examples) if examples else "",
-            "Audio": "", "Strokes": build_strokes_field(word, graphics),
+            "Audio": "", "Strokes": build_strokes_field(word, graphics), "Keyword": "",
         }
 
         scene, props = {}, []
