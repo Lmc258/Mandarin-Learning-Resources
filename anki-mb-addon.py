@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-mb_anki.py - build Mandarin Blueprint cards in Anki from the terminal.
+anki-mb-addon.py - build Mandarin Blueprint cards in Anki from the terminal.
 
 Type a character; it works out the actor, set, room and props and sends a
 finished note to Anki. Recalling the movie is left to you at review time -
@@ -25,11 +25,11 @@ Setup (once)
      code 2055492159), restart Anki, and leave it running.
   2. The first time you run any command, you'll be asked where to save your
      files (hmm.ini, settings, history). Your answer is remembered; change it
-     later with: python3 mb_anki.py savedir <path>
-  3. python3 mb_anki.py hmm-init
+     later with: python3 anki-mb-addon.py savedir <path>
+  3. python3 anki-mb-addon.py hmm-init
      Creates the 'MB Component' note type in Anki (if missing) and writes
      hmm.ini (tone rooms + syllable-split corrections) to your save directory.
-  4. python3 mb_anki.py shell
+  4. python3 anki-mb-addon.py shell
      The first run asks which deck to add cards to, and which deck holds
      your props/actors/sets. 'Hanzi Movie Method' is created (or repaired,
      if you've since added a field or card type here) automatically, and
@@ -37,7 +37,7 @@ Setup (once)
 
 Daily use
 ---------
-  python3 mb_anki.py                 # same as 'shell'
+  python3 anki-mb-addon.py           # same as 'shell'
 
     > only
       character  pinyin  ·  meaning
@@ -57,6 +57,9 @@ Other commands
   migrate-props  one-off: push old actors.csv/sets.csv/props.csv into the component deck
   migrate-legacy one-off: standardize old-format cards already in the component deck
   syllables      print the full computed initial/final split (--diff for overrides only)
+
+See also: anki-mb-sentences.py, a companion tool for whole-sentence cards
+(sentence <-> translation, two cards per sentence) - same config directory.
 
 No third-party packages. Python 3.8+.
 """
@@ -551,14 +554,14 @@ class ComponentStore:
         if deck not in invoke("deckNames"):
             raise SystemExit(
                 f"Component deck '{deck}' not found in Anki.\n"
-                f"Change it with: python3 mb_anki.py shell   (then 'component-deck')"
+                f"Change it with: python3 anki-mb-addon.py shell   (then 'component-deck')"
             )
         try:
             fields = invoke("modelFieldNames", modelName=COMPONENT_MODEL)
         except RuntimeError as exc:
             raise SystemExit(
                 f"Note type '{COMPONENT_MODEL}' not found in Anki ({exc}).\n"
-                f"Run: python3 mb_anki.py hmm-init"
+                f"Run: python3 anki-mb-addon.py hmm-init"
             )
         missing = [f for f in ("Kind", "Key", "Value") if f not in fields]
         if missing:
@@ -918,10 +921,10 @@ Config is in {args.config}/ . Next:
      that is; anything missing is offered as a prompt as you go.
   2. hmm.ini has your tone rooms and any syllable-split corrections.
      Spot-check the full computed table ({len(seen)} syllables) against your
-     MB pinyin chart with:  python3 mb_anki.py syllables
+     MB pinyin chart with:  python3 anki-mb-addon.py syllables
      Only rows that disagree with it need adding to hmm.ini's [syllables].
 
-Then:  python mb_anki.py hmm-check words.txt""")
+Then:  python3 anki-mb-addon.py hmm-check words.txt""")
 
 
 # ==========================================================================
@@ -1072,7 +1075,7 @@ SHELL_HELP = """
   component-deck  change which deck holds your props/actors/sets
   audio           toggle downloading pronunciation audio
   where           print the paths of your config and component deck
-  savedir         show the save directory (change it with: mb_anki.py savedir <path>)
+  savedir         show the save directory (change it with: anki-mb-addon.py savedir <path>)
   ?               this help
   q               quit
 
@@ -1164,7 +1167,7 @@ def cmd_shell(args):
                     continue
                 if low == "savedir":
                     print(f"  {os.path.abspath(cfg)}")
-                    print(f"  {C['dim']}change with: python3 mb_anki.py savedir <path>{C['off']}")
+                    print(f"  {C['dim']}change with: python3 anki-mb-addon.py savedir <path>{C['off']}")
                     continue
                 if not HANZI_RE.search(raw):
                     print(f"  {C['red']}Not Chinese text.{C['off']} ? for help.")
@@ -1330,7 +1333,7 @@ def resolve_config_dir(explicit):
     os.makedirs(chosen, exist_ok=True)
     save_app_config({"config_dir": chosen})
     print(f"  {C['green']}saved{C['off']} {C['dim']}- change anytime with: "
-          f"python3 mb_anki.py savedir <path>{C['off']}\n")
+          f"python3 anki-mb-addon.py savedir <path>{C['off']}\n")
     return chosen
 
 
