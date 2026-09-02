@@ -129,15 +129,27 @@ WORD_CSS = """\
 .examples { font-size: 13px; color: #888; margin-top: 14px; }
 .hw-row { display: flex; justify-content: center; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
 .hw-target { border: 1px solid #ddd; border-radius: 6px; }
+
+/* Anki's night mode only swaps .card's own background/text colour - it
+   doesn't know about these custom classes, so their light-mode greys (tuned
+   for a white background) would otherwise stay put and wash out against a
+   dark one. Re-tune each tier's lightness so the same visual hierarchy
+   (pinyin > keyword/scene > label) still reads clearly in the dark. */
+.card.night_mode { background-color: #2f2f31; color: #e8e8e8; }
+.night_mode .pinyin { color: #e0e0e0; }
+.night_mode .keyword { color: #c9c9c9; }
+.night_mode .scene { color: #bfbfbf; }
+.night_mode .scene .label { color: #9e9e9e; }
+.night_mode .examples { color: #c0c0c0; }
 """
 
 WORD_FRONT = """\
-<div class="hanzi">{{Hanzi}}</div>
-{{Audio}}"""
+<div class="hanzi">{{Hanzi}}</div>"""
 
 WORD_BACK = """\
 {{FrontSide}}
 <hr id=answer>
+{{Audio}}
 <div class="pinyin">{{Pinyin}}</div>
 <div class="meaning">{{Meaning}}</div>
 {{#Keyword}}<div class="keyword">{{Keyword}}</div>{{/Keyword}}
@@ -171,9 +183,9 @@ WRITING_FRONT = """\
     row.appendChild(target);
     HanziWriter.create(target.id, entry.char, {
       width: 140, height: 140, padding: 5,
-      showOutline: true, showCharacter: false,
+      showOutline: false, showCharacter: false,
       charDataLoader: function (_c, onLoad) { onLoad(entry); },
-    }).quiz();
+    }).quiz({ showHintAfterMisses: 3 });
   });
 })();
 </script>"""
@@ -322,7 +334,8 @@ def load_cedict(path: str):
             trad, simp, pin, defs = m.groups()
             glosses = [d.strip() for d in defs.split("/") if d.strip()]
             glosses = [g for g in glosses
-                       if not re.match(r"^(CL:|Taiwan pr\.|also pr\.|abbr\. for)", g)]
+                       if not re.match(r"^(CL:|Taiwan pr\.|also pr\.|abbr\. for|\(Tw\)|Tai-lo pr\.)", g)
+                       and "transcribe the Taiwanese" not in g]
             if not glosses:
                 continue
             entries.setdefault(simp, []).append(
@@ -533,6 +546,10 @@ def ensure_word_model():
         if to_update:
             invoke("updateModelTemplates", model={"name": WORD_MODEL, "templates": to_update})
 
+        restyled = invoke("modelStyling", modelName=WORD_MODEL)["css"] != WORD_CSS
+        if restyled:
+            invoke("updateModelStyling", model={"name": WORD_MODEL, "css": WORD_CSS})
+
         bits = []
         if missing:
             bits.append(f"added missing field(s): {', '.join(missing)}")
@@ -540,6 +557,8 @@ def ensure_word_model():
             bits.append(f"added card type(s): {', '.join(added)}")
         if changed:
             bits.append(f"updated card type(s): {', '.join(changed)}")
+        if restyled:
+            bits.append("updated styling")
         print(f"using note type '{WORD_MODEL}'" + (f" ({'; '.join(bits)})" if bits else ""))
     ensure_hanzi_writer_js()
 

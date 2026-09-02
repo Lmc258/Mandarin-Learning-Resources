@@ -37,10 +37,13 @@ No third-party packages. Python 3.8+.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
 import sys
+import urllib.parse
 import urllib.request
 
 ANKI_CONNECT_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
@@ -52,7 +55,7 @@ DEFAULT_WORD_DECK = "Hanzi Movie Method"
 
 HANZI_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 
-SENTENCE_FIELDS = ["Sentence", "Translation", "Notes", "NewWords"]
+SENTENCE_FIELDS = ["Sentence", "Translation", "Notes", "NewWords", "Audio"]
 
 SENTENCE_CSS = """\
 .card {
@@ -65,24 +68,37 @@ SENTENCE_CSS = """\
 .notes { font-size: 15px; color: #888; font-style: italic; margin-top: 10px; }
 .new-words { font-size: 14px; color: #666; margin-top: 10px; }
 .new-words .label { color: #999; margin-right: 6px; }
+
+/* See anki-mb-addon.py's WORD_CSS for why this is needed: Anki's night mode
+   only re-colours .card itself, not these custom classes, so their greys
+   (tuned for a white background) would otherwise wash out in the dark. */
+.card.night_mode { background-color: #2f2f31; color: #e8e8e8; }
+.night_mode .notes { color: #c9c9c9; }
+.night_mode .new-words { color: #bfbfbf; }
+.night_mode .new-words .label { color: #9e9e9e; }
 """
 
 # 'Sentence' is the sort field (first field) - duplicate detection keys on
-# the exact sentence text, same idea as 'Hanzi' in anki-mb-addon.py.
+# the exact sentence text, same idea as 'Hanzi' in anki-mb-addon.py. Audio is
+# only on the Back: hearing the sentence read aloud before you've attempted
+# the Translation->Sentence card would give away the reading. NewWords is on
+# the Front (and, via {{FrontSide}}, carries onto the Back too) so you have
+# that context while attempting the card, not just after.
+NEW_WORDS_HTML = ('{{#NewWords}}<div class="new-words"><span class="label">new</span>'
+                   '{{NewWords}}</div>{{/NewWords}}')
+
 SENTENCE_TEMPLATES = {
     "Sentence to Translation": {
-        "Front": '<div class="text">{{Sentence}}</div>',
+        "Front": '<div class="text">{{Sentence}}</div>' + NEW_WORDS_HTML,
         "Back": '{{FrontSide}}<hr id=answer><div class="text">{{Translation}}</div>'
-                '{{#Notes}}<div class="notes">{{Notes}}</div>{{/Notes}}'
-                '{{#NewWords}}<div class="new-words"><span class="label">new</span>'
-                '{{NewWords}}</div>{{/NewWords}}',
+                '{{Audio}}'
+                '{{#Notes}}<div class="notes">{{Notes}}</div>{{/Notes}}',
     },
     "Translation to Sentence": {
-        "Front": '<div class="text">{{Translation}}</div>',
+        "Front": '<div class="text">{{Translation}}</div>' + NEW_WORDS_HTML,
         "Back": '{{FrontSide}}<hr id=answer><div class="text">{{Sentence}}</div>'
-                '{{#Notes}}<div class="notes">{{Notes}}</div>{{/Notes}}'
-                '{{#NewWords}}<div class="new-words"><span class="label">new</span>'
-                '{{NewWords}}</div>{{/NewWords}}',
+                '{{Audio}}'
+                '{{#Notes}}<div class="notes">{{Notes}}</div>{{/Notes}}',
     },
 }
 
@@ -107,6 +123,20 @@ def invoke(action, **params):
     if body.get("error"):
         raise RuntimeError(f"AnkiConnect error on '{action}': {body['error']}")
     return body["result"]
+
+
+def fetch_audio(text: str) -> bytes | None:
+    """Google Translate TTS. Free, no key, but be gentle with it."""
+    url = "https://translate.google.com/translate_tts?" + urllib.parse.urlencode(
+        {"ie": "UTF-8", "q": text, "tl": "zh-CN", "client": "tw-ob"}
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"  ! audio failed: {exc}\n")
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -143,6 +173,10 @@ def ensure_sentence_model():
     if to_update:
         invoke("updateModelTemplates", model={"name": SENTENCE_MODEL, "templates": to_update})
 
+    restyled = invoke("modelStyling", modelName=SENTENCE_MODEL)["css"] != SENTENCE_CSS
+    if restyled:
+        invoke("updateModelStyling", model={"name": SENTENCE_MODEL, "css": SENTENCE_CSS})
+
     bits = []
     if missing:
         bits.append(f"added missing field(s): {', '.join(missing)}")
@@ -150,6 +184,8 @@ def ensure_sentence_model():
         bits.append(f"added card type(s): {', '.join(added)}")
     if changed:
         bits.append(f"updated card type(s): {', '.join(changed)}")
+    if restyled:
+        bits.append("updated styling")
     print(f"using note type '{SENTENCE_MODEL}'" + (f" ({'; '.join(bits)})" if bits else ""))
 
 
@@ -252,10 +288,16 @@ def build_one(sentence, deck, known):
     new_words = ask("  new/unlearned words used (optional)? ", default=suggested)
 
     fields = {"Sentence": sentence, "Translation": translation,
-              "Notes": notes, "NewWords": new_words}
+              "Notes": notes, "NewWords": new_words, "Audio": ""}
 
     if not yes(f"  add to {deck}?"):
         raise Cancel
+
+    data = fetch_audio(sentence)
+    if data:
+        fname = f"mb_sent_{hashlib.md5(sentence.encode()).hexdigest()[:12]}.mp3"
+        invoke("storeMediaFile", filename=fname, data=base64.b64encode(data).decode())
+        fields["Audio"] = f"[sound:{fname}]"
 
     if deck not in invoke("deckNames"):
         invoke("createDeck", deck=deck)
