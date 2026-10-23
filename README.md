@@ -161,6 +161,7 @@ Resources useful at any stage of learning.
 | Mandarin Frequency List 1–1000 | Word List | The most common 1,000 Mandarin words — a great source for building an Anki deck | [Wiktionary](https://en.wiktionary.org/wiki/Appendix:Mandarin_Frequency_lists/1-1000) |
 | Claude / ChatGPT | AI Tool | Translate, annotate, correct sentences, generate practice prompts, and convert self-talk scripts to Mandarin | [claude.ai](https://claude.ai) / [chatgpt.com](https://chatgpt.com) |
 | Pleco | Dictionary App | The go-to Mandarin dictionary app; shows characters, Pinyin, definitions, stroke order, and example sentences | [pleco.com](https://www.pleco.com) |
+| FindChineseName | Website | Suggests a natural, native-style Chinese name (not a transliteration) to use in class, with Pinyin and character meanings; basic result is free with no account | [findchinesename.com](https://findchinesename.com) |
 
 ---
 
