@@ -9,9 +9,9 @@ Setup (once):
     pip install pydub faster-whisper edge-tts
 
 Usage:
-    python add_english.py input.mp3 [more.mp3 ...]
-    python add_english.py *.mp3 --model large-v3
-    python add_english.py input.mp3 --dry-run     # only count sentences
+    python add-english.py input.mp3 [more.mp3 ...]
+    python add-english.py *.mp3 --model large-v3
+    python add-english.py input.mp3 --dry-run     # only count sentences
 
 Outputs next to each input:
     <name>_with_english.mp3

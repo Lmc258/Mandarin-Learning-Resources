@@ -2,7 +2,7 @@
 """
 anki-mb-sentences.py - build whole-sentence Anki cards from the terminal.
 
-Companion to anki-mb-addon.py (same "type it, it lands in Anki" idea, but for
+Companion to anki-mb-characters.py (same "type it, it lands in Anki" idea, but for
 sentences instead of characters). Paste a sentence, type its translation, and
 it becomes one Anki note with two cards: sentence -> translation and
 translation -> sentence. An optional note (your own memory hook) and an
@@ -15,7 +15,7 @@ Setup (once)
   1. Install the AnkiConnect add-on in Anki (Tools > Add-ons > Get Add-ons,
      code 2055492159), restart Anki, and leave it running.
   2. The first time you run any command, you'll be asked where to save your
-     files (settings, history) - the same save directory anki-mb-addon.py
+     files (settings, history) - the same save directory anki-mb-characters.py
      uses, if you've already set one up there.
   3. python3 anki-mb-sentences.py
      Asks which deck sentence cards go to. 'MB Sentence' is created (or
@@ -51,7 +51,7 @@ CACHE_DIR = os.path.join(os.path.expanduser("~"), ".mb_anki")
 APP_CONFIG_PATH = os.path.join(CACHE_DIR, "app_config.json")
 SENTENCE_MODEL = "MB Sentence"
 DEFAULT_SENTENCE_DECK = "Hanzi Movie Method Sentences"
-DEFAULT_WORD_DECK = "Hanzi Movie Method"
+DEFAULT_CHAR_DECK = "Hanzi Movie Method"
 
 HANZI_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 
@@ -69,7 +69,7 @@ SENTENCE_CSS = """\
 .new-words { font-size: 14px; color: #666; margin-top: 10px; }
 .new-words .label { color: #999; margin-right: 6px; }
 
-/* See anki-mb-addon.py's WORD_CSS for why this is needed: Anki's night mode
+/* See anki-mb-characters.py's CHAR_CSS for why this is needed: Anki's night mode
    only re-colours .card itself, not these custom classes, so their greys
    (tuned for a white background) would otherwise wash out in the dark. */
 .card.night_mode { background-color: #2f2f31; color: #e8e8e8; }
@@ -79,7 +79,7 @@ SENTENCE_CSS = """\
 """
 
 # 'Sentence' is the sort field (first field) - duplicate detection keys on
-# the exact sentence text, same idea as 'Hanzi' in anki-mb-addon.py. Audio is
+# the exact sentence text, same idea as 'Hanzi' in anki-mb-characters.py. Audio is
 # only on the Back: hearing the sentence read aloud before you've attempted
 # the Translation->Sentence card would give away the reading. NewWords is on
 # the Front (and, via {{FrontSide}}, carries onto the Back too) so you have
@@ -330,7 +330,7 @@ def cmd_shell(args):
     settings = load_settings(cfg)
     decks = sorted(invoke("deckNames"))
     current_deck = settings.get("sentence_deck", DEFAULT_SENTENCE_DECK)
-    word_deck = settings.get("deck", DEFAULT_WORD_DECK)
+    char_deck = settings.get("deck", DEFAULT_CHAR_DECK)
     # The remembered/default deck may not exist in Anki yet - choose() only
     # lists real decks, so it has to be added here or a brand-new deck name
     # could never be selected, first-run or not.
@@ -339,10 +339,10 @@ def cmd_shell(args):
     save_settings(cfg, {"sentence_deck": deck})
 
     ensure_sentence_model()
-    known = known_chars(word_deck)
+    known = known_chars(char_deck)
 
     print(f"\n  {C['bold']}MB Sentences{C['off']}  {C['dim']}·  "
-          f"{len(known)} known character(s) from '{word_deck}'{C['off']}")
+          f"{len(known)} known character(s) from '{char_deck}'{C['off']}")
     print(f"  {C['dim']}deck{C['off']} {deck}")
     print(f"  {C['dim']}? for help, q to quit{C['off']}")
 
@@ -363,7 +363,7 @@ def cmd_shell(args):
                 continue
             if low == "where":
                 print(f"  deck: {deck}")
-                print(f"  word deck (for new-word detection): {word_deck}")
+                print(f"  character deck (for new-word detection): {char_deck}")
                 continue
             if not HANZI_RE.search(raw):
                 print(f"  {C['red']}Not Chinese text.{C['off']} ? for help.")
@@ -387,7 +387,7 @@ def _write_history(readline, path):
 
 
 # --------------------------------------------------------------------------
-# Config (same save directory / settings.json as anki-mb-addon.py)
+# Config (same save directory / settings.json as anki-mb-characters.py)
 # --------------------------------------------------------------------------
 
 def load_app_config():
@@ -408,7 +408,7 @@ def save_app_config(data):
 
 def prompt_save_dir(default):
     print(f"\n  {C['bold']}First run{C['off']} - where should this tool keep its files?")
-    print(f"  {C['dim']}(settings and history - shared with anki-mb-addon.py if you use both){C['off']}")
+    print(f"  {C['dim']}(settings and history - shared with anki-mb-characters.py if you use both){C['off']}")
     try:
         val = input(f"  save directory [{default}]: ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -419,7 +419,7 @@ def prompt_save_dir(default):
 
 def resolve_config_dir(explicit):
     """Where settings/history live. Priority: --config flag > MB_CONFIG env
-    > saved choice from a previous run (shared with anki-mb-addon.py) > ask."""
+    > saved choice from a previous run (shared with anki-mb-characters.py) > ask."""
     if explicit:
         return explicit
     env = os.environ.get("MB_CONFIG")
@@ -456,7 +456,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--deck", help="deck to add sentence cards to")
-    p.add_argument("--config", default=None, help="save directory (default: shared with anki-mb-addon.py)")
+    p.add_argument("--config", default=None, help="save directory (default: shared with anki-mb-characters.py)")
     args = p.parse_args()
     args.config = resolve_config_dir(args.config)
     cmd_shell(args)

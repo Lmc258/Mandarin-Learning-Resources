@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-anki-mb-addon.py - build Mandarin Blueprint cards in Anki from the terminal.
+anki-mb-characters.py - build Mandarin Blueprint cards in Anki from the terminal.
 
 Type a character; it works out the actor, set, room and props and sends a
 finished note to Anki. Recalling the movie is left to you at review time -
@@ -25,11 +25,11 @@ Setup (once)
      code 2055492159), restart Anki, and leave it running.
   2. The first time you run any command, you'll be asked where to save your
      files (hmm.ini, settings, history). Your answer is remembered; change it
-     later with: python3 anki-mb-addon.py savedir <path>
-  3. python3 anki-mb-addon.py hmm-init
+     later with: python3 anki-mb-characters.py savedir <path>
+  3. python3 anki-mb-characters.py hmm-init
      Creates the 'MB Component' note type in Anki (if missing) and writes
      hmm.ini (tone rooms + syllable-split corrections) to your save directory.
-  4. python3 anki-mb-addon.py shell
+  4. python3 anki-mb-characters.py shell
      The first run asks which deck to add cards to, and which deck holds
      your props/actors/sets. 'Hanzi Movie Method' is created (or repaired,
      if you've since added a field or card type here) automatically, and
@@ -37,7 +37,7 @@ Setup (once)
 
 Daily use
 ---------
-  python3 anki-mb-addon.py           # same as 'shell'
+  python3 anki-mb-characters.py           # same as 'shell'
 
     > only
       character  pinyin  ·  meaning
@@ -95,18 +95,18 @@ HANZI_WRITER_MEDIA = "_hanzi-writer.min.js"
 APP_CONFIG_PATH = os.path.join(CACHE_DIR, "app_config.json")
 COMPONENT_MODEL = "MB Component"
 DEFAULT_COMPONENT_DECK = "Hanzi Movie Method Components"
-DEFAULT_WORD_DECK = "Hanzi Movie Method"
+DEFAULT_CHAR_DECK = "Hanzi Movie Method"
 COMPONENT_SUBDECKS = {"actor": "Actors", "set": "Sets", "prop": "Props"}
 
 # The note type this tool owns for word/character cards. Fixed, not guessed:
 # no stock Chinese note type has Actor/Set/Room/Props fields, so matching
 # against whatever the user already has silently drops most of the card.
 # 'Hanzi' (the sort field) is what duplicate detection keys on.
-WORD_MODEL = "Hanzi Movie Method"
-WORD_FIELDS = ["Hanzi", "Pinyin", "Meaning", "Actor", "Set", "Room", "Props",
+CHAR_MODEL = "Hanzi Movie Method"
+CHAR_FIELDS = ["Hanzi", "Pinyin", "Meaning", "Actor", "Set", "Room", "Props",
                "Examples", "Audio", "Initial", "Final", "Tone", "Strokes", "Keyword"]
 
-WORD_CSS = """\
+CHAR_CSS = """\
 .card {
   font-family: arial;
   text-align: center;
@@ -143,10 +143,10 @@ WORD_CSS = """\
 .night_mode .examples { color: #c0c0c0; }
 """
 
-WORD_FRONT = """\
+CHAR_FRONT = """\
 <div class="hanzi">{{Hanzi}}</div>"""
 
-WORD_BACK = """\
+CHAR_BACK = """\
 {{FrontSide}}
 <hr id=answer>
 {{Audio}}
@@ -510,45 +510,45 @@ def ensure_hanzi_writer_js():
     print(f"stored {HANZI_WRITER_MEDIA} in Anki media")
 
 
-WORD_TEMPLATES = {
-    "Recognition": {"Front": WORD_FRONT, "Back": WORD_BACK},
+CHAR_TEMPLATES = {
+    "Recognition": {"Front": CHAR_FRONT, "Back": CHAR_BACK},
     "Writing": {"Front": WRITING_FRONT, "Back": WRITING_BACK},
 }
 
 
-def ensure_word_model():
+def ensure_char_model():
     """Create the 'Hanzi Movie Method' note type, or bring an existing one in
     line with the fields/templates defined here (e.g. a field or card type
     added since, or template HTML edited since). Never touches existing
     notes - only the model definition."""
-    if WORD_MODEL not in invoke("modelNames"):
-        invoke("createModel", modelName=WORD_MODEL, inOrderFields=WORD_FIELDS,
-               css=WORD_CSS, cardTemplates=[
-                   {"Name": name, **tpl} for name, tpl in WORD_TEMPLATES.items()
+    if CHAR_MODEL not in invoke("modelNames"):
+        invoke("createModel", modelName=CHAR_MODEL, inOrderFields=CHAR_FIELDS,
+               css=CHAR_CSS, cardTemplates=[
+                   {"Name": name, **tpl} for name, tpl in CHAR_TEMPLATES.items()
                ])
-        print(f"created note type '{WORD_MODEL}' ({len(WORD_FIELDS)} fields, "
-              f"{len(WORD_TEMPLATES)} card types)")
+        print(f"created note type '{CHAR_MODEL}' ({len(CHAR_FIELDS)} fields, "
+              f"{len(CHAR_TEMPLATES)} card types)")
     else:
-        fields = invoke("modelFieldNames", modelName=WORD_MODEL)
-        missing = [f for f in WORD_FIELDS if f not in fields]
+        fields = invoke("modelFieldNames", modelName=CHAR_MODEL)
+        missing = [f for f in CHAR_FIELDS if f not in fields]
         for f in missing:
-            invoke("modelFieldAdd", modelName=WORD_MODEL, fieldName=f)
+            invoke("modelFieldAdd", modelName=CHAR_MODEL, fieldName=f)
 
-        current = invoke("modelTemplates", modelName=WORD_MODEL)
+        current = invoke("modelTemplates", modelName=CHAR_MODEL)
         added, changed, to_update = [], [], {}
-        for name, tpl in WORD_TEMPLATES.items():
+        for name, tpl in CHAR_TEMPLATES.items():
             if name not in current:
-                invoke("modelTemplateAdd", modelName=WORD_MODEL, template={"Name": name, **tpl})
+                invoke("modelTemplateAdd", modelName=CHAR_MODEL, template={"Name": name, **tpl})
                 added.append(name)
             elif current[name].get("Front") != tpl["Front"] or current[name].get("Back") != tpl["Back"]:
                 to_update[name] = tpl
                 changed.append(name)
         if to_update:
-            invoke("updateModelTemplates", model={"name": WORD_MODEL, "templates": to_update})
+            invoke("updateModelTemplates", model={"name": CHAR_MODEL, "templates": to_update})
 
-        restyled = invoke("modelStyling", modelName=WORD_MODEL)["css"] != WORD_CSS
+        restyled = invoke("modelStyling", modelName=CHAR_MODEL)["css"] != CHAR_CSS
         if restyled:
-            invoke("updateModelStyling", model={"name": WORD_MODEL, "css": WORD_CSS})
+            invoke("updateModelStyling", model={"name": CHAR_MODEL, "css": CHAR_CSS})
 
         bits = []
         if missing:
@@ -559,7 +559,7 @@ def ensure_word_model():
             bits.append(f"updated card type(s): {', '.join(changed)}")
         if restyled:
             bits.append("updated styling")
-        print(f"using note type '{WORD_MODEL}'" + (f" ({'; '.join(bits)})" if bits else ""))
+        print(f"using note type '{CHAR_MODEL}'" + (f" ({'; '.join(bits)})" if bits else ""))
     ensure_hanzi_writer_js()
 
 
@@ -573,14 +573,14 @@ class ComponentStore:
         if deck not in invoke("deckNames"):
             raise SystemExit(
                 f"Component deck '{deck}' not found in Anki.\n"
-                f"Change it with: python3 anki-mb-addon.py shell   (then 'component-deck')"
+                f"Change it with: python3 anki-mb-characters.py shell   (then 'component-deck')"
             )
         try:
             fields = invoke("modelFieldNames", modelName=COMPONENT_MODEL)
         except RuntimeError as exc:
             raise SystemExit(
                 f"Note type '{COMPONENT_MODEL}' not found in Anki ({exc}).\n"
-                f"Run: python3 anki-mb-addon.py hmm-init"
+                f"Run: python3 anki-mb-characters.py hmm-init"
             )
         missing = [f for f in ("Kind", "Key", "Value") if f not in fields]
         if missing:
@@ -940,10 +940,10 @@ Config is in {args.config}/ . Next:
      that is; anything missing is offered as a prompt as you go.
   2. hmm.ini has your tone rooms and any syllable-split corrections.
      Spot-check the full computed table ({len(seen)} syllables) against your
-     MB pinyin chart with:  python3 anki-mb-addon.py syllables
+     MB pinyin chart with:  python3 anki-mb-characters.py syllables
      Only rows that disagree with it need adding to hmm.ini's [syllables].
 
-Then:  python3 anki-mb-addon.py hmm-check words.txt""")
+Then:  python3 anki-mb-characters.py hmm-check words.txt""")
 
 
 # ==========================================================================
@@ -1080,7 +1080,7 @@ def warn_empty_fields(fields, indent="  "):
     """Say so out loud if a field we always try to fill came out blank.
     Audio and Keyword are excluded - Audio is legitimately empty whenever
     audio is off, and Keyword is a manual, entirely optional note."""
-    blank = [f for f in WORD_FIELDS if f not in ("Audio", "Keyword") and not fields.get(f)]
+    blank = [f for f in CHAR_FIELDS if f not in ("Audio", "Keyword") and not fields.get(f)]
     if blank:
         print(f"{indent}{C['yellow']}warning: empty field(s): {', '.join(blank)}{C['off']}")
     return blank
@@ -1094,7 +1094,7 @@ SHELL_HELP = """
   component-deck  change which deck holds your props/actors/sets
   audio           toggle downloading pronunciation audio
   where           print the paths of your config and component deck
-  savedir         show the save directory (change it with: anki-mb-addon.py savedir <path>)
+  savedir         show the save directory (change it with: anki-mb-characters.py savedir <path>)
   ?               this help
   q               quit
 
@@ -1122,7 +1122,7 @@ def cmd_shell(args):
     settings = load_settings(cfg)
 
     decks = sorted(invoke("deckNames"))
-    current_deck = settings.get("deck", DEFAULT_WORD_DECK)
+    current_deck = settings.get("deck", DEFAULT_CHAR_DECK)
     current_component_deck = settings.get("component_deck", DEFAULT_COMPONENT_DECK)
     # The remembered/default deck may not exist in Anki yet (e.g. a fresh
     # setup) - choose() only lists real decks, so it has to be added here or
@@ -1134,7 +1134,7 @@ def cmd_shell(args):
     audio = args.audio or settings.get("audio", False)
     save_settings(cfg, {"deck": deck, "component_deck": component_deck, "audio": audio})
 
-    ensure_word_model()
+    ensure_char_model()
     ensure_component_model()
     store = ComponentStore(component_deck)
     hmm = HMM(cfg, store)
@@ -1186,7 +1186,7 @@ def cmd_shell(args):
                     continue
                 if low == "savedir":
                     print(f"  {os.path.abspath(cfg)}")
-                    print(f"  {C['dim']}change with: python3 anki-mb-addon.py savedir <path>{C['off']}")
+                    print(f"  {C['dim']}change with: python3 anki-mb-characters.py savedir <path>{C['off']}")
                     continue
                 if not HANZI_RE.search(raw):
                     print(f"  {C['red']}Not Chinese text.{C['off']} ? for help.")
@@ -1298,7 +1298,7 @@ def build_one(word, entries, contains, known, existing, hmm, deck, audio, graphi
     if deck not in invoke("deckNames"):
         invoke("createDeck", deck=deck)
     try:
-        invoke("addNote", note={"deckName": deck, "modelName": WORD_MODEL,
+        invoke("addNote", note={"deckName": deck, "modelName": CHAR_MODEL,
                                 "fields": fields, "tags": ["mb-auto"],
                                 "options": {"allowDuplicate": False}})
     except RuntimeError as exc:
@@ -1352,7 +1352,7 @@ def resolve_config_dir(explicit):
     os.makedirs(chosen, exist_ok=True)
     save_app_config({"config_dir": chosen})
     print(f"  {C['green']}saved{C['off']} {C['dim']}- change anytime with: "
-          f"python3 anki-mb-addon.py savedir <path>{C['off']}\n")
+          f"python3 anki-mb-characters.py savedir <path>{C['off']}\n")
     return chosen
 
 
@@ -1439,7 +1439,7 @@ def cmd_inspect(_args):
 
 
 def cmd_add(args):
-    ensure_word_model()
+    ensure_char_model()
 
     if args.deck not in invoke("deckNames"):
         if args.dry_run:
@@ -1525,7 +1525,7 @@ def cmd_add(args):
         if not args.dry_run:
             invoke("addNote", note={
                 "deckName": args.deck,
-                "modelName": WORD_MODEL,
+                "modelName": CHAR_MODEL,
                 "fields": fields,
                 "tags": ["mb-auto"] + (args.tag or []),
                 "options": {"allowDuplicate": args.allow_duplicates},

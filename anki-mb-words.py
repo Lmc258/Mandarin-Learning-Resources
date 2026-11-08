@@ -2,21 +2,19 @@
 """
 anki-mb-words.py - build multi-character word cards from the terminal.
 
-Companion to anki-mb-addon.py (single characters) and anki-mb-sentences.py
+Companion to anki-mb-characters.py (single characters) and anki-mb-sentences.py
 (whole sentences) - this one is for words made of two or more characters, so
 they get their own deck instead of being mixed in with single hanzi.
 
 Paste a Mandarin Blueprint-style word block:
 
-    打电话
+    <word>
 
-    Usage 1 - "to make a phone call"
+    Usage 1 - "<meaning>"
 
     Living Link Suggestion(s):
 
-        You know the song "Hit the Phone, Jack" right? Bonus points if you
-        actually know what a phone jack is :)
-        Use your finger to dial the phone keypad and MAKE A PHONE CALL.
+        <your own memory hook>
 
     .
 
@@ -31,7 +29,7 @@ Setup (once)
      code 2055492159), restart Anki, and leave it running.
   2. The first time you run any command, you'll be asked where to save your
      files (settings, history, CC-CEDICT) - the same save directory
-     anki-mb-addon.py/anki-mb-sentences.py use, if you've set one up there.
+     anki-mb-characters.py/anki-mb-sentences.py use, if you've set one up there.
   3. python3 anki-mb-words.py
      Asks which deck word cards go to. 'MB Word' is created (or repaired,
      if you've since edited the template HTML here) automatically.
@@ -50,6 +48,14 @@ Daily use
 
     > paste a word block, then a lone '.' to finish it
       (or just the word, then answer the prompts by hand)
+
+  Pinyin and audio are generated automatically: pinyin from CC-CEDICT (the
+  whole word if it's listed, otherwise piece by piece / character by
+  character), audio from Google Translate TTS.
+
+  Added word notes by hand in Anki, or have some with empty Pinyin/Audio?
+     python3 anki-mb-words.py fill --dry-run   # preview first
+     python3 anki-mb-words.py fill             # fill in only what's empty
 
 No third-party packages. Python 3.8+.
 """
@@ -76,14 +82,14 @@ CEDICT_CACHE = os.path.join(CACHE_DIR, "cedict.txt")
 CEDICT_URL = "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz"
 
 WORD_MODEL = "MB Word"
-NEW_WORDS_DECK = "Hanzi Movie Method Words"
-LEGACY_CHAR_DECK = "Hanzi Movie Method"                          # this tool's single-char deck
+DEFAULT_WORDS_DECK = "Hanzi Movie Method Words"
+DEFAULT_CHAR_DECK = "Hanzi Movie Method"            # anki-mb-characters.py's deck
 LEGACY_IMPORT_DECK = "mandarin-blueprint-imports-word&characters"  # old bulk import
 
 HANZI_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 
 # 'Word' is the sort field (first field) - duplicate detection keys on the
-# word text, same idea as 'Hanzi' in anki-mb-addon.py / 'Sentence' in
+# word text, same idea as 'Hanzi' in anki-mb-characters.py / 'Sentence' in
 # anki-mb-sentences.py.
 WORD_FIELDS = ["Word", "Pinyin", "Usages", "LivingLinks", "Examples", "Audio"]
 
@@ -106,7 +112,7 @@ WORD_CSS = """\
 .living-links .link { margin: 5px 0; }
 .examples { font-size: 13px; color: #888; margin-top: 14px; }
 
-/* See anki-mb-addon.py's WORD_CSS for why this is needed: Anki's night mode
+/* See anki-mb-characters.py's CHAR_CSS for why this is needed: Anki's night mode
    only re-colours .card itself, not these custom classes, so their greys
    (tuned for a white background) would otherwise wash out in the dark. */
 .card.night_mode { background-color: #2f2f31; color: #e8e8e8; }
@@ -301,6 +307,41 @@ def lookup(entries, word: str):
     return max(cands, key=score)
 
 
+def word_pinyin(entries, word: str) -> str:
+    """Tone-marked pinyin for a word. Uses the whole-word CC-CEDICT entry
+    when there is one; otherwise splits the word into the longest pieces
+    CEDICT knows, falling back to single characters, so words missing from
+    the dictionary (or new compounds) still get pinyin. Anything CEDICT
+    doesn't know at all, such as punctuation, is kept as it is."""
+    entry = lookup(entries, word)
+    if entry:
+        return numbered_to_marks(entry["pinyin"])
+    out, i = [], 0
+    while i < len(word):
+        for j in range(len(word), i, -1):
+            piece = lookup(entries, word[i:j])
+            if piece:
+                out.append(numbered_to_marks(piece["pinyin"]))
+                i = j
+                break
+        else:
+            if word[i].strip():
+                out.append(word[i])
+            i += 1
+    return " ".join(out)
+
+
+def store_word_audio(word: str) -> str:
+    """Fetch TTS for a word, store it in Anki's media folder and return
+    the '[sound:...]' tag for the Audio field (empty string on failure)."""
+    data = fetch_audio(word)
+    if not data:
+        return ""
+    fname = f"mb_word_{hashlib.md5(word.encode()).hexdigest()[:12]}.mp3"
+    invoke("storeMediaFile", filename=fname, data=base64.b64encode(data).decode())
+    return f"[sound:{fname}]"
+
+
 # --------------------------------------------------------------------------
 # Note type
 # --------------------------------------------------------------------------
@@ -489,8 +530,9 @@ def build_one(block, deck, entries):
         raise Cancel
 
     entry = lookup(entries, word)
-    default_pinyin = numbered_to_marks(entry["pinyin"]) if entry else ""
-    pinyin = ask("  pinyin? ", default=default_pinyin)
+    default_pinyin = word_pinyin(entries, word)
+    pinyin = ask(f"  pinyin? {C['dim']}[{default_pinyin}]{C['off']} " if default_pinyin
+                 else "  pinyin? ", default=default_pinyin)
 
     usages = list(block["usages"])
     if not usages:
@@ -521,11 +563,7 @@ def build_one(block, deck, entries):
     if not yes(f"  add to {deck}?"):
         raise Cancel
 
-    data = fetch_audio(word)
-    if data:
-        fname = f"mb_word_{hashlib.md5(word.encode()).hexdigest()[:12]}.mp3"
-        invoke("storeMediaFile", filename=fname, data=base64.b64encode(data).decode())
-        fields["Audio"] = f"[sound:{fname}]"
+    fields["Audio"] = store_word_audio(word)
 
     if deck not in invoke("deckNames"):
         invoke("createDeck", deck=deck)
@@ -556,7 +594,7 @@ def cmd_shell(args):
 
     settings = load_settings(cfg)
     decks = sorted(invoke("deckNames"))
-    current_deck = settings.get("words_deck", NEW_WORDS_DECK)
+    current_deck = settings.get("words_deck", DEFAULT_WORDS_DECK)
     deck = args.deck or choose("Which deck should word cards go to?",
                                 sorted(set(decks) | {current_deck}), current_deck)
     save_settings(cfg, {"words_deck": deck})
@@ -609,6 +647,74 @@ def _write_history(readline, path):
         readline.write_history_file(path)
     except OSError:
         pass
+
+
+# --------------------------------------------------------------------------
+# Fill in missing pinyin/audio on existing notes
+# --------------------------------------------------------------------------
+
+def cmd_fill(args):
+    """Backfill empty Pinyin and/or Audio fields on existing 'MB Word'
+    notes - e.g. ones added by hand in Anki, migrated without audio, or
+    whose TTS download failed at add-time. Fields that already have
+    something in them are never overwritten."""
+    import time
+
+    ensure_word_model()
+    query = f'note:"{WORD_MODEL}"' + (f' deck:"{args.deck}"' if args.deck else "")
+    ids = invoke("findNotes", query=query)
+    notes = invoke("notesInfo", notes=ids) if ids else []
+
+    want_pinyin = not args.audio_only
+    want_audio = not args.pinyin_only
+    todo = []
+    for n in notes:
+        f = n["fields"]
+        word = extract_cjk(f["Word"]["value"])
+        if not word:
+            continue
+        need_pinyin = want_pinyin and not _unescape(re.sub(r"<[^>]+>", "", f["Pinyin"]["value"])).strip()
+        need_audio = want_audio and "[sound:" not in f["Audio"]["value"]
+        if need_pinyin or need_audio:
+            todo.append((n["noteId"], word, need_pinyin, need_audio))
+
+    print(f"{len(notes)} '{WORD_MODEL}' note(s), {len(todo)} missing "
+          f"{'/'.join(x for x, on in (('pinyin', want_pinyin), ('audio', want_audio)) if on)}\n")
+    if not todo:
+        return
+
+    entries = load_cedict(ensure_cedict(None)) if any(t[2] for t in todo) else {}
+    filled = 0
+    for note_id, word, need_pinyin, need_audio in todo:
+        update, bits = {}, []
+        if need_pinyin:
+            pinyin = word_pinyin(entries, word)
+            if pinyin:
+                update["Pinyin"] = pinyin
+                bits.append(pinyin)
+            else:
+                bits.append(f"{C['red']}no pinyin found{C['off']}")
+        if need_audio:
+            if args.dry_run:
+                bits.append("+audio")
+            else:
+                tag = store_word_audio(word)
+                if tag:
+                    update["Audio"] = tag
+                    bits.append("+audio")
+                else:
+                    bits.append(f"{C['red']}audio failed{C['off']}")
+                time.sleep(args.delay)
+        verb = "would fill" if args.dry_run else "fill"
+        print(f"{verb}  {word:<6} {'  '.join(bits)}")
+        if update and not args.dry_run:
+            invoke("updateNoteFields", note={"id": note_id, "fields": update})
+            filled += 1
+
+    if args.dry_run:
+        print(f"\nwould update up to {len(todo)} note(s) - run again without --dry-run to apply")
+    else:
+        print(f"\nupdated {filled} note(s)")
 
 
 # --------------------------------------------------------------------------
@@ -680,7 +786,7 @@ def cmd_migrate(args):
     ensure_word_model()
     entries = load_cedict(ensure_cedict(None))
 
-    deck = args.deck or NEW_WORDS_DECK
+    deck = args.deck or DEFAULT_WORDS_DECK
     if deck not in invoke("deckNames") and not args.dry_run:
         invoke("createDeck", deck=deck)
 
@@ -711,7 +817,7 @@ def cmd_migrate(args):
                           "examples": examples, "audio": audio,
                           "note": n, "source_deck": import_deck})
 
-    char_deck = args.char_deck or LEGACY_CHAR_DECK
+    char_deck = args.char_deck or DEFAULT_CHAR_DECK
     if char_deck in invoke("deckNames"):
         ids = invoke("findNotes", query=f'deck:"{char_deck}" note:"Hanzi Movie Method"')
         for n in (invoke("notesInfo", notes=ids) if ids else []):
@@ -725,6 +831,10 @@ def cmd_migrate(args):
             pools.append({"word": word, "pinyin": f["Pinyin"]["value"], "usages": usages,
                           "links": links, "examples": f["Examples"]["value"],
                           "audio": f["Audio"]["value"], "note": n, "source_deck": char_deck})
+
+    for item in pools:
+        if not item["pinyin"].strip():
+            item["pinyin"] = word_pinyin(entries, item["word"])
 
     seen = set(already)
     to_create, skipped = [], 0
@@ -755,11 +865,7 @@ def cmd_migrate(args):
             continue
 
         if not item["audio"]:
-            data = fetch_audio(item["word"])
-            if data:
-                fname = f"mb_word_{hashlib.md5(item['word'].encode()).hexdigest()[:12]}.mp3"
-                invoke("storeMediaFile", filename=fname, data=base64.b64encode(data).decode())
-                fields["Audio"] = f"[sound:{fname}]"
+            fields["Audio"] = store_word_audio(item["word"])
 
         try:
             invoke("addNote", note={"deckName": deck, "modelName": WORD_MODEL,
@@ -787,7 +893,7 @@ def cmd_migrate(args):
 
 
 # --------------------------------------------------------------------------
-# Config (same save directory / settings.json as anki-mb-addon.py)
+# Config (same save directory / settings.json as anki-mb-characters.py)
 # --------------------------------------------------------------------------
 
 def load_app_config():
@@ -859,17 +965,25 @@ def main():
     sh.add_argument("--deck", help="deck to add word cards to")
     sh.add_argument("--config", default=None)
 
+    fl = sub.add_parser("fill", help="fill in missing pinyin/audio on existing word notes")
+    fl.add_argument("--deck", help="only notes in this deck (default: every 'MB Word' note)")
+    fl.add_argument("--pinyin-only", action="store_true", help="don't download audio")
+    fl.add_argument("--audio-only", action="store_true", help="don't fill pinyin")
+    fl.add_argument("--delay", type=float, default=0.4, help="seconds between audio fetches")
+    fl.add_argument("--dry-run", action="store_true", help="preview without changing anything")
+    fl.add_argument("--config", default=None)
+
     mg = sub.add_parser("migrate", help="one-off: pull existing multi-character words out of "
                                          "the legacy import and your character deck")
     mg.add_argument("--deck", help="words deck to migrate into")
     mg.add_argument("--legacy-deck", help=f"legacy bulk-imported deck (default: {LEGACY_IMPORT_DECK})")
-    mg.add_argument("--char-deck", help=f"your single-character deck (default: {LEGACY_CHAR_DECK})")
+    mg.add_argument("--char-deck", help=f"your single-character deck (default: {DEFAULT_CHAR_DECK})")
     mg.add_argument("--dry-run", action="store_true", help="preview without changing anything")
     mg.add_argument("--config", default=None)
 
     args = p.parse_args(sys.argv[1:] or ["shell"])
     args.config = resolve_config_dir(args.config)
-    {"shell": cmd_shell, "migrate": cmd_migrate}[args.cmd](args)
+    {"shell": cmd_shell, "fill": cmd_fill, "migrate": cmd_migrate}[args.cmd](args)
 
 
 if __name__ == "__main__":
