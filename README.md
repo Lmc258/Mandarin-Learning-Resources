@@ -33,6 +33,7 @@ Free tools, links, and resources for learning **Simplified Mandarin Chinese**.
 | [`anki-mb-characters.py`](anki-mb-characters.py) | Builds Mandarin Blueprint character cards (actor, set, room, props) in Anki, with recognition and offline stroke-writing cards |
 | [`anki-mb-words.py`](anki-mb-words.py) | Builds multi-character word cards from pasted Mandarin Blueprint word blocks, with auto-generated Pinyin (CC-CEDICT) and audio; `fill` backfills existing notes |
 | [`anki-mb-sentences.py`](anki-mb-sentences.py) | Builds two-way sentence cards and suggests new words from your existing deck |
+| [`anki-export-wordlist.py`](anki-export-wordlist.py) | Exports every studied (not new or suspended) character, word and sentence from those decks to a plain-text list at `~/Documents/mandarin-wordlist.txt`, e.g. to upload to an AI tutor |
 | [`add-english.py`](add-english.py) | Adds a spoken English translation before each Chinese sentence in an mp3, and writes a transcript |
 
 The Anki scripts need the [AnkiConnect](https://ankiweb.net/shared/info/2055492159) add-on running. See each script's header for setup and usage.

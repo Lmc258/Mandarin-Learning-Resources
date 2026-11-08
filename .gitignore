@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 mb_config/
+
+# Exported Anki word lists are personal - never commit them
+mandarin-wordlist*.txt
